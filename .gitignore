@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Build / dist
+build/
+dist/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Web (future)
+node_modules/
+web/dist/
+web/.vite/
+
+# Recordings / data
+data/
+recordings/
+*.csv
+*.parquet
+*.h5
+sensor_data_log/
+
+# Local secrets / config
+.env
+.env.local
