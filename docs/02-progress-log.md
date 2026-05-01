@@ -49,6 +49,29 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-02 — ui/ppg-view.ts (full stack with DSP placeholders) [PROGRESS]
+
+**무엇을**: sensor-dashboard `PPGVisualizer.tsx` 의 모든 패널 미러링.
+
+**5 패널 구성**:
+1. **LeadOff banner**: PPG 는 parser 가 lead-off 를 추출하지 않으므로 (firmware 패킷에 PPG 전용 lead-off 바이트 없음) DOM 만 만들고 `display: none` 고정. DSP/quality 단계에서 활성 가능.
+2. **Raw IR/RED chart**: ECharts 멀티라인. y 범위 auto-scale (raw 값이 1-2 자릿수 변동) — sensor-dashboard 에는 없는 패널 (필터드만 있음). 우리는 DSP 가 없으니 raw 직접 표시.
+3. **Filtered chart placeholder**: dashed border + "DSP not yet implemented" 텍스트. DSP 도착 시 동일 컨테이너에 ECharts init.
+4. **BPM trend placeholder**: 동일 패턴.
+5. **MetricsCards 14개**: `createMetricCard` 활용. 라벨/단위/색은 sensor-dashboard `PPGMetricsCards.tsx` 그대로 (BPM, SpO₂, HR Max/Min, Stress, RMSSD, SDNN, SDSD, LF/HF Power, LF/HF, AVNN, pNN50, pNN20). 값은 모두 `update(null)` placeholder.
+
+**Window**: 400 samples (8s @ 50Hz) — sensor-dashboard `PPG_BUFFER_SIZE` 그대로.
+
+**API**: `createPpgView(container) → { onBatch(PpgBatch), dispose() }`.
+
+**검증**: `tsc --noEmit` 통과. `npm run build` 7.43 KB (main.ts 가 아직 import 안 함).
+
+**다음 단계**: ui/acc-view.ts (3-axis line chart).
+
+**참조**: `src/ui/ppg-view.ts`, sensor-dashboard `components/ppg/*` 5 파일.
+
+---
+
 ### 2026-05-02 — ui/eeg-view.ts (Visualizer + LeadOff banner) [PROGRESS]
 
 **무엇을**: sensor-dashboard `EEGVisualizer.tsx` 의 메인 패널을 vanilla TS 로 미러링.
