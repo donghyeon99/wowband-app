@@ -2,12 +2,18 @@
 
 ## What this is
 
-Educational sensor analysis tool. Python implements the full **Link Band BLE SDK**
-(connection, packet parsing, DSP, metric computation). React side is a thin viewer
-that consumes WebSocket messages — no business logic on the frontend.
+Educational sensor analysis tool, deployable as a **single static SPA on Vercel**.
+The browser implements the full **Link Band BLE SDK** in TypeScript (Web Bluetooth
+API for connection + packet parsing + DSP + metric computation + visualization).
+No backend server.
 
-End users are **students**. Implementation is by the repo owner (donghyeon99);
-students consume the resulting Python package and notebooks rather than co-authoring.
+End users are **students**. They access via a Vercel URL (Chromium-based browser
+required for Web Bluetooth). Implementation is by the repo owner (donghyeon99).
+
+**Python is preserved as reference implementation only** — see `linkband/` directory.
+The Python parser produces validation outputs against which the TS parser is checked
+(byte-for-byte and value-for-value). Python code is no longer actively developed
+beyond reference parity.
 
 ## Status
 
@@ -27,31 +33,59 @@ students consume the resulting Python package and notebooks rather than co-autho
 ## Architecture
 
 ```
-[Link Band headband] ──BLE──> [Python] ──WebSocket──> [React viewer]
-                              · BLE connect (bleak)
-                              · packet parse
-                              · DSP filters
-                              · metrics (BPM, HRV, band power)
+[Link Band headband] ──BLE (Web Bluetooth API)──> [Browser TS app]
+                                                  · scan / connect / GATT
+                                                  · packet parse
+                                                  · DSP filters
+                                                  · metrics (BPM, HRV, band power)
+                                                  · React/Canvas visualization
 ```
 
-## Immediate next step (P0 from spec §16)
+Constraints: Web Bluetooth requires Chromium (Chrome/Edge), HTTPS or localhost,
+and a user gesture (button click) to call `requestDevice()`. Vercel auto-provisions
+HTTPS so production is fine.
 
-Implement **`linkband/models.py`** per spec §13.
+## Immediate next step
 
-- Method **가** (assistant drafts → owner reviews → commit) for this file.
-- After this file the method may switch to **나** (owner writes → assistant reviews) —
-  confirm at the time.
-- After `models.py`: `linkband/parser.py` (testable with synthetic packets, no real
-  device needed). Then `linkband/ble.py` (needs real device).
+Scaffold **`web/`** — Vite + TypeScript (strict). First milestone: scan → connect →
+CCCD enable → EEG `start` write → display per-sensor packet counts. No parsing yet,
+no charts. This is the TS analogue of the Python `spike_dump.py` and validates the
+Web Bluetooth path before building higher layers.
+
+After scaffold: `web/src/linkband/models.ts` (port from `linkband/models.py`),
+`web/src/linkband/parser.ts` (port from `linkband/parser.py`), `web/src/linkband/ble.ts`,
+then visualization.
+
+See progress-log for detailed P0 sequence.
 
 ## Working style preferences
 
-- Professional Python: type hints, dataclasses, numpy. Educational comments only for
-  the **WHY** (e.g., 24-bit sign-extension, μV conversion formula).
-- **numpy batch dataclasses**, not per-sample objects (250 Hz EEG would explode).
-- `uv` for dependency management. `uv sync` to set up.
-- Python **3.12**.
-- Format/lint: `ruff` (configured in pyproject.toml).
+### TypeScript (primary, in `web/`)
+
+- **Strict mode** TS (`tsconfig.json` with `"strict": true`).
+- Use `Uint8Array` / `DataView` for binary parsing. Mirror Python's `int.from_bytes`
+  semantics carefully (note `DataView.getUint32(0, true)` for LE uint32).
+- Keep parser stateless or with explicit state object — no globals. Mirror the
+  Python `Parser` class API where it makes sense.
+- Vite + TS for build. `vitest` for unit tests. ESLint + Prettier.
+- Vanilla TS for first milestone; adopt React when entering visualization phase.
+- Type sensor batches as plain objects with `Float64Array` / `Int32Array` /
+  `Int16Array` typed arrays — TS analogue of numpy ndarrays for performance.
+- Comments only for the **WHY** (24-bit sign extension, μV conversion, byte order).
+
+### Python (reference, in `linkband/`)
+
+- Frozen at commit `be16261` (parser 15/15 GREEN). Touch only when fixing
+  reference-parity bugs that affect TS validation.
+- `uv` for dep mgmt; `ruff` for lint; `pytest` for tests.
+
+### Cross-validation discipline
+
+- Same fixture hex bytes (`tests/fixtures/real*/`) feed both Python and TS parser
+  tests. Outputs (per-sample values, μV conversions, timestamps) must match
+  byte-for-byte / float-equality.
+- When a discrepancy emerges, Python's output is the reference UNLESS the divergence
+  is documented in spec/progress-log (e.g., the §8 PPG sign-extension fix).
 
 ## Logging discipline (mandatory)
 
@@ -100,18 +134,22 @@ authority lives in the upstream code.
 
 ### When to cross-reference (not optional)
 
-- **Writing `parser.py`**: read source #1 `SensorDataParser.kt` line-by-line. If your
-  Python diverges from Kotlin in any way (other than the documented Q1/Q2 strategy
-  and the §8 PPG sign-extension fix), justify the divergence in code comment + spec.
-- **Writing `ble.py`**: read source #1 `BleManager.kt` for the GATT sequence,
-  CCCD enable order, and EEG `start`/`stop` write payload. The spec §4–§5 is a
-  summary; the original has timing details (sleeps, retries) that matter.
-- **Writing `dsp.py` or `metrics.py`**: check source #3 `sensor-dashboard` first —
-  it likely already has band-pass filters, BPM detection, HRV. Reuse the algorithms
-  (port to Python) rather than redesigning.
-- **Resolving any ambiguity in spec**: source #1 is canonical. If source #1 and
-  source #2 disagree, document the discrepancy in spec §17 and pick the safer
-  interpretation with rationale.
+- **Writing `parser.ts`**: cross-reference both `linkband/parser.py` (this repo,
+  reference impl, GREEN) AND source #1 `SensorDataParser.kt`. The Python is the
+  authoritative numerical reference. Any divergence from Python must produce
+  identical numerical outputs on shared fixtures.
+- **Writing `ble.ts`**: read source #1 `BleManager.kt` for GATT sequence,
+  CCCD enable order, EEG `start`/`stop` write payload. Web Bluetooth API differs
+  from Android `BluetoothGatt` — check `linkband/spike_dump.py` for the bleak
+  variant. spec §4–§5 is summary only.
+- **Writing DSP / metrics in TS**: source #3 `sensor-dashboard/src/lib/dsp/`
+  is **TypeScript already** — port directly with minimal translation. This is a
+  major win of the TS pivot: existing biquad/eegPipeline/ppgPipeline/spectrum
+  code can be reused.
+- **Resolving any ambiguity in spec**: source #1 (Kotlin) is canonical for
+  protocol. Empirical findings in `tests/fixtures/real*/` override Kotlin where
+  they disagree (e.g., 500 Hz EEG, 16-bit LE ACC — Kotlin had bugs). Python
+  parser is canonical for numerical conversion (μV, timestamps).
 
 ### How to access
 
