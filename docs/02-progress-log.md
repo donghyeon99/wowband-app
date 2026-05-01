@@ -49,6 +49,29 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-01 (저녁) — parser.test.ts 13 cases (RED) [PROGRESS]
+
+**무엇을**: `tests/parser.test.ts` (200+줄) 작성. Python reference (`reference-py/tests/test_parser.py`, 15/15 GREEN at commit be16261) 의 13 의미 케이스를 그대로 포팅.
+
+**구성**:
+- 합성 패킷 빌더 3개 (`eegPacket` / `ppgPacket` / `accPacket`) — Python 의 동일 헬퍼 미러링.
+- 실 디바이스 fixture 3개 (`EEG_REAL_LINE1` / `PPG_REAL_LINE1` / `ACC_REAL_LINE1`) — Python 과 동일한 hex 상수.
+- `EEG_LSB_UV` 상수 — μV 변환 정확도 sanity 비교용.
+
+**13 케이스 분포 (Python 동일)**:
+- header timestamp (2): timeRaw=32768→1.0, timeRaw=0→0.0
+- EEG conversion (5): LSB μV, max+, sign-ext, leadOff, real fixture
+- PPG sign-ext trap (2): high byte ≥0x80 unsigned, real fixture
+- ACC 16-bit LE decoder (3): per-axis decode, LSB+MSB both, real fixture
+- Battery (1)
+- EEG timestamp continuity (2): 1/500 step, reset 후 헤더 재초기화
+
+**RED 확인**: `npm run test:run` → tests/parser.test.ts 가 `Cannot find module '../src/linkband/parser'` 로 collection 실패. sanity.test.ts 만 1/1 pass. 의도된 RED.
+
+**참조**: `tests/parser.test.ts`, `reference-py/tests/test_parser.py` (정답지).
+
+---
+
 ### 2026-05-01 (저녁) — vitest dev infrastructure [PROGRESS]
 
 **무엇을**: TS 영역에 단위 테스트 셋업. parser 13 케이스 포팅을 위한 사전 작업.
