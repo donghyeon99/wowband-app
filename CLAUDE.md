@@ -76,7 +76,7 @@ authority lives in the upstream code.
 |---|---|---|---|
 | 1 | https://github.com/LooxidLabs/SDK-Android (`develop` branch) | **Primary** Kotlin reference. Cleanest, smallest. The whole spec is derived from these 7 files. | `src/main/java/com/looxidlabs/sdkandroid/SensorDataParser.kt` (parsing), `BleManager.kt` (UUIDs, GATT sequence), `SensorConfiguration.kt` (magic numbers), `SensorData.kt` (data model) |
 | 2 | https://github.com/LooxidLabs/link_band_sdk | **Cross-validation** Python reference (~80 files). Compare parsing edge cases against ours. | `python_core/app/core/device.py`, `python_core/app/core/signal_processing.py`, `python_core/device.py` |
-| 3 | https://github.com/donghyeon99/sensor-dashboard | **Predecessor repo** (mock-data based React dashboard). Has DSP filters, chart components, EEG/PPG metric implementations that may be reusable when we get to P1/P2. | `src/dsp/`, `src/components/eeg/`, `src/components/ppg/`, `src/lib/` |
+| 3 | https://github.com/donghyeon99/sensor-dashboard | **Predecessor repo** (mock-data based React dashboard). Has DSP filters, chart components, EEG/PPG metric implementations that may be reusable when we get to P1/P2. | `src/lib/dsp/` (biquad, eegPipeline, ppgPipeline, spectrum), `src/lib/sensors/` (adapters, types), `src/lib/thresholds/`, `src/components/eeg/`, `src/components/ppg/` (PPGBpmTrendChart etc.), `src/stores/slices/` (eegStore, ppgStore) |
 | 4 | `../sensor-dashboard/.tmp_kotlin/` (local sibling, gitignored) | Offline cache of source #1. Same content, no network required. | `BleManager.kt`, `SensorDataParser.kt`, `SensorConfiguration.kt`, `LinkBandSdk.kt` |
 
 ### When to cross-reference (not optional)
