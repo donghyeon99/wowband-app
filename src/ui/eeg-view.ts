@@ -372,6 +372,16 @@ export function createEegView(container: HTMLElement): EegViewHandle {
   const ch1SqiBuf: number[] = [];
   const ch2SqiBuf: number[] = [];
 
+  // EEG batch 는 50ms 마다 (20 Hz). 무거운 DSP (computeEegPower 7M ops, calculateEegSqi
+  // 1M ops × 2 ch) 를 매 batch 호출하면 ~160M ops/sec → 브라우저 stall. counter 로 throttle:
+  //   - filtered 차트: 매 batch (가볍고 시각 즉시 반응 필요)
+  //   - SQI / spectrum: 매 5 batches (= 250ms 갱신)
+  //   - band power / indices: 매 10 batches (= 500ms 갱신, Morlet 무거움)
+  let batchCount = 0;
+  const SQI_INTERVAL = 5;
+  const SPECTRUM_INTERVAL = 5;
+  const POWER_INTERVAL = 10;
+
   function pushAndTrim(buf: number[], v: number): void {
     buf.push(v);
     if (buf.length > EEG_BUFFER_SIZE) buf.splice(0, buf.length - EEG_BUFFER_SIZE);
@@ -420,49 +430,59 @@ export function createEegView(container: HTMLElement): EegViewHandle {
         series: [{ data: ch2Data }],
       });
 
-      // SQI: 전체 filtered buffer 에 대해 계산 → 마지막 batch 길이만큼 SQI buffer 에 append.
-      const sqi1 = calculateEegSqi(ch1Buf);
-      const sqi2 = calculateEegSqi(ch2Buf);
-      const newCount = batch.ch1Uv.length;
-      for (const v of sqi1.slice(-newCount)) pushAndTrim(ch1SqiBuf, v);
-      for (const v of sqi2.slice(-newCount)) pushAndTrim(ch2SqiBuf, v);
-      const sqi1Last = Math.max(ch1SqiBuf.length - 1, 0);
-      const sqi2Last = Math.max(ch2SqiBuf.length - 1, 0);
-      const sqi1Data: Array<[number, number]> = ch1SqiBuf.map((v, i) => [(i - sqi1Last) / fs, v]);
-      const sqi2Data: Array<[number, number]> = ch2SqiBuf.map((v, i) => [(i - sqi2Last) / fs, v]);
-      sqi1Chart.chart.setOption({
-        xAxis: { min: -EEG_WINDOW_SEC, max: 0 },
-        series: [{ data: sqi1Data }],
-      });
-      sqi2Chart.chart.setOption({
-        xAxis: { min: -EEG_WINDOW_SEC, max: 0 },
-        series: [{ data: sqi2Data }],
-      });
+      batchCount++;
 
-      // Power spectrum: raw buffer 에 대해 DFT (sensor-dashboard 와 동일).
-      const ch1Spec = computeSpectrum(ch1RawBuf, fs, 1, 45);
-      const ch2Spec = computeSpectrum(ch2RawBuf, fs, 1, 45);
-      if (ch1Spec.length > 0 || ch2Spec.length > 0) {
-        spectrumChart.chart.setOption({
-          series: [{ data: ch1Spec }, { data: ch2Spec }],
+      // SQI: 매 5 batches (250ms). 호출당 ~1M ops × 2 ch.
+      if (batchCount % SQI_INTERVAL === 0) {
+        const sqi1 = calculateEegSqi(ch1Buf);
+        const sqi2 = calculateEegSqi(ch2Buf);
+        // 누락 보정: throttle 동안의 batch (= newCount × SQI_INTERVAL) 개를 한꺼번에 append.
+        const append = batch.ch1Uv.length * SQI_INTERVAL;
+        for (const v of sqi1.slice(-append)) pushAndTrim(ch1SqiBuf, v);
+        for (const v of sqi2.slice(-append)) pushAndTrim(ch2SqiBuf, v);
+        const sqi1Last = Math.max(ch1SqiBuf.length - 1, 0);
+        const sqi2Last = Math.max(ch2SqiBuf.length - 1, 0);
+        const sqi1Data: Array<[number, number]> = ch1SqiBuf.map((v, i) => [(i - sqi1Last) / fs, v]);
+        const sqi2Data: Array<[number, number]> = ch2SqiBuf.map((v, i) => [(i - sqi2Last) / fs, v]);
+        sqi1Chart.chart.setOption({
+          xAxis: { min: -EEG_WINDOW_SEC, max: 0 },
+          series: [{ data: sqi1Data }],
+        });
+        sqi2Chart.chart.setOption({
+          xAxis: { min: -EEG_WINDOW_SEC, max: 0 },
+          series: [{ data: sqi2Data }],
         });
       }
 
-      // Band power + Indices: raw buffer 가 충분히 차야 (≥600 samples = 1.2s @500Hz).
-      const power = computeEegPower(ch1RawBuf, ch2RawBuf, fs);
-      if (power) {
-        for (const band of EEG_BANDS) {
-          const avg = (power.bands[band.key].ch1Db + power.bands[band.key].ch2Db) / 2;
-          bandCards[band.key].update(avg);
+      // Power spectrum: 매 5 batches (250ms). DFT 호출당 ~45k ops × 2 ch (가벼우나 그래도 throttle).
+      if (batchCount % SPECTRUM_INTERVAL === 0) {
+        const ch1Spec = computeSpectrum(ch1RawBuf, fs, 1, 45);
+        const ch2Spec = computeSpectrum(ch2RawBuf, fs, 1, 45);
+        if (ch1Spec.length > 0 || ch2Spec.length > 0) {
+          spectrumChart.chart.setOption({
+            series: [{ data: ch1Spec }, { data: ch2Spec }],
+          });
         }
-        const idx = computeEegIndices(power);
-        indexCards.focusIndex.update(idx.focusIndex);
-        indexCards.relaxationIndex.update(idx.relaxationIndex);
-        indexCards.stressIndex.update(idx.stressIndex);
-        indexCards.cognitiveLoad.update(idx.cognitiveLoad);
-        indexCards.hemisphericBalance.update(idx.hemisphericBalance);
-        indexCards.emotionalStability.update(idx.emotionalStability);
-        indexCards.totalPower.update(idx.totalPower);
+      }
+
+      // Band power + Indices: 매 10 batches (500ms). Morlet wavelet × 5 bands × 2 ch
+      // ≈ 7M ops/call — 가장 무거움. 매 batch (20Hz) 호출 시 ~140M ops/sec 로 stall.
+      if (batchCount % POWER_INTERVAL === 0) {
+        const power = computeEegPower(ch1RawBuf, ch2RawBuf, fs);
+        if (power) {
+          for (const band of EEG_BANDS) {
+            const avg = (power.bands[band.key].ch1Db + power.bands[band.key].ch2Db) / 2;
+            bandCards[band.key].update(avg);
+          }
+          const idx = computeEegIndices(power);
+          indexCards.focusIndex.update(idx.focusIndex);
+          indexCards.relaxationIndex.update(idx.relaxationIndex);
+          indexCards.stressIndex.update(idx.stressIndex);
+          indexCards.cognitiveLoad.update(idx.cognitiveLoad);
+          indexCards.hemisphericBalance.update(idx.hemisphericBalance);
+          indexCards.emotionalStability.update(idx.emotionalStability);
+          indexCards.totalPower.update(idx.totalPower);
+        }
       }
     },
     resize(): void {

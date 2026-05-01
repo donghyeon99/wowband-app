@@ -49,6 +49,44 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-02 — eeg-view DSP throttle 도입 (브라우저 stall 수정) [FIX]
+
+**증상**: 사용자가 Replay 시작 후 일정 시간 뒤 "갑자기 멈췄어 그래프가 안그려져" 보고. EEG 탭의 차트들이 갱신을 멈춤.
+
+**원인**: EEG batch 가 50ms 주기 (= 20 Hz). 매 batch 마다 호출되던 무거운 DSP:
+- `computeEegPower` (Morlet wavelet × 5 bands × 2 channels) ≈ **7M ops/call** → 20Hz × 7M = **140M ops/sec**
+- `calculateEegSqi` 2 channels ≈ **1M ops/call** → 20M ops/sec
+- `computeSpectrum` 2 channels ≈ 45k ops × 20 = 900k ops/sec
+- 합산 ~160M ops/sec — Math.exp/sin/cos 가 절반 → 실효 100M+ ops/sec 상한 근접 → 누적 lag → main thread stall → 차트 갱신 멈춤
+
+**Fix** (`src/ui/eeg-view.ts`): frame counter 로 cadence 분리.
+- **Filtered 차트** (가벼움): 매 batch (50ms 시각 반응)
+- **SQI**: 매 5 batches (250ms)
+- **Power spectrum**: 매 5 batches (250ms)
+- **Band power + Indices** (가장 무거움): 매 10 batches (500ms)
+- SQI throttle 시 누락 보정: append 길이를 `batch.length × SQI_INTERVAL` 로 확장 → 시간축 일관성 유지
+
+**부하 비교**:
+| 항목 | 수정 전 | 수정 후 |
+|---|---|---|
+| computeEegPower | 20 Hz | 2 Hz |
+| calculateEegSqi | 20 Hz | 4 Hz |
+| computeSpectrum | 20 Hz | 4 Hz |
+| 총 ops/sec | ~160M | ~17M |
+
+500ms band power 갱신은 시각적으로 충분 (사람 인지 한계). filter chart 의 50ms 갱신은 그대로라 신호 모양엔 영향 없음.
+
+**가드레일**:
+- 새 폴더 0, 새 dependency 0
+- chart.ts / parser.ts / models.ts / main.ts / layout.ts / ppg-view / acc-view / dsp.ts 수정 0
+- view 파일만 수정 (eeg-view.ts 의 onBatch 로직 부분)
+
+**검증**: `tsc --noEmit` 통과. `npm run test:run` **53/53 GREEN**. `npm run build` 통과 (JS 552.92 → 553.01 KB, +0.09 KB counter logic).
+
+**참조**: `src/ui/eeg-view.ts` `onBatch` (line 380~), 배치 throttle counter.
+
+---
+
 ### 2026-05-02 — sdk.linkband.store 배포 코드 비교 [VERIFIED]
 
 **무엇을**: 배포 빌드 source map 분석 후 우리 DSP 와 6 항목 비교. 코드 수정 없음 — 보고만.
