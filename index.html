@@ -14,12 +14,16 @@
       th { background: #fafafa; font-weight: 600; }
       .detail { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.85rem; color: #555; }
       .note { color: #666; font-size: 0.9rem; }
+      button + button { margin-left: 0.5rem; }
+      #eeg-chart { display: block; margin-top: 1rem; border: 1px solid #ddd; background: #fafafa; }
+      .chart-label { font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
     </style>
   </head>
   <body>
     <h1>Link Band — receive (spike)</h1>
     <p class="note">Chromium (Chrome / Edge) 전용. HTTPS 또는 localhost 에서만 동작.</p>
     <button id="connect">Connect to LXB-…</button>
+    <button id="replay">Replay fixtures</button>
     <div id="status">Disconnected</div>
     <table>
       <thead>
@@ -32,6 +36,8 @@
         <tr id="row-bat"><td>Battery</td><td class="pkt">0</td><td class="byt">0</td><td class="detail"></td></tr>
       </tbody>
     </table>
+    <p class="chart-label">EEG ch1 (last ~4s @ 500Hz, y-range ±300 μV — saturated samples clamp to top/bottom edge)</p>
+    <canvas id="eeg-chart" width="600" height="100"></canvas>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

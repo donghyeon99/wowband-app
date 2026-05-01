@@ -49,6 +49,46 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-01 (저녁) — Replay 버튼 + EEG ch1 Canvas, 디바이스 없이 종단 검증 [PROGRESS]
+
+**무엇을**: 자율모드 5단 커밋의 마지막 항목. 디바이스 없이 dump replay 만으로 전체 파이프라인 (parser + UI + chart) 동작 확인 가능.
+
+**index.html**:
+- `<button id="replay">Replay fixtures</button>` 추가 (Connect 옆).
+- `<canvas id="eeg-chart" width="600" height="100">` + 라벨 추가.
+- CSS: `#eeg-chart { display: block; margin-top: 1rem; border: 1px solid #ddd; background: #fafafa; }`, `button + button { margin-left: 0.5rem; }`.
+
+**src/main.ts** (단일 파일, 새 폴더 X):
+- **Ring buffer**: `eegBuffer: number[]` (max 2000 = 4s @ 500Hz). `pushEegSamples(Float64Array)` 가 새 ch1Uv 샘플을 append + 오버플로우 trim. `onEegBytes` 안에서 호출.
+- **Canvas 그리기**: `drawEeg()` 가 ctx.clearRect → 0μV reference line → 폴리라인 한 번. y 범위 ±300 μV 고정, saturated 샘플은 clamp 로 캔버스 위/아래 경계에 그어지게 (안 보이면 검증 어려우니 의도적 clamp). `requestAnimationFrame(chartLoop)` 으로 60fps.
+- **Replay**:
+  - `probeFixtureRoot()`: real1/ 우선, 없으면 real/, 둘 다 안 되면 null. 자율모드 사전 검증으로 Vite dev 가 둘 다 200 OK 응답 확인됨.
+  - `replayStream(url, handler, cadenceMs)`: fetch → text → 줄별 분해 (`<usec_hex>\t<packet_hex>\n`) → hex → Uint8Array → handler 호출 → cadence 만큼 sleep.
+  - `replay()`: EEG/PPG/ACC 3 stream 을 `Promise.all` 로 동시 진행. 각자 자기 cadence (50/560/1200ms) 로 진행 → 라이브 BLE 와 거의 같은 시간 분포.
+  - Replay 버튼 클릭 핸들러로 연결.
+
+**왜 라이브 BLE 와 replay 가 같은 파이프라인인가**: `on{Eeg,Ppg,Acc,Bat}Bytes(Uint8Array)` 가 양쪽의 단일 진입점. 라이브 측은 `makeHandler(sensor)` 가 `BluetoothRemoteGATTCharacteristic.value` → Uint8Array → dispatch[sensor] 호출, replay 측은 hex → Uint8Array → 같은 handler 호출. 디코드/표시/차트 로직은 한 곳에만 존재.
+
+**검증** (autonomous 한도 내):
+- `npm run test:run` → 16/16 passed (sanity 1 + parser 15)
+- `tsc --noEmit` 통과
+- `npm run build` → JS 5.68KB → **7.43KB** (replay + canvas 로직 추가분)
+- Vite dev fixture URL probe: real1/eeg.txt → 200 OK (205700 B), real/eeg.txt → 200 OK (173162 B)
+
+**사용자 검증 (다음에)**:
+- `npm run dev` → http://localhost:5173 → Replay 클릭:
+  - EEG row 디코드 값이 `ch1=336083.3μV  ch2=336083.3μV  leadOff=N  t=14.27s` 부근으로 갱신됨 (saturated dump)
+  - PPG row: `RED=16646  IR=24626` 부근부터 시작
+  - ACC row: `x=14592  y=1792  z=-8192` 부근부터 시작
+  - eeg-chart 캔버스: ch1 값이 ±300 μV 범위 밖 (saturated)이라 폴리라인이 캔버스 상단 경계 (y=0) 에 flat 하게 그려짐 — 그게 saturated 신호의 정상 표시
+- 그 후 Connect 클릭 → 라이브 BLE 도 같은 파이프라인 통과 확인 (디코드 값 + 차트 모두 동작)
+
+**제약**: replay 의 fetch 경로는 Vite dev 에서만 동작. production (Vercel) 빌드에는 dump 가 안 들어가므로 replay 는 dev 전용 (의도된 한계 — fixture 는 검증용 자산이지 배포 대상 아님).
+
+**참조**: `src/main.ts`, `index.html`, `reference-py/tests/fixtures/real1/`.
+
+---
+
 ### 2026-05-01 (저녁) — main.ts 가 parser 사용, 디코드 값 표시 [PROGRESS]
 
 **무엇을**: `src/main.ts` 의 BLE notification 처리 경로에 parser 결합. 라이브 BLE 와 (다음 단계) replay 가 같은 파이프라인을 공유하도록 단일 처리 함수 4개 추가:

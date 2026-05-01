@@ -52,9 +52,68 @@ function setDetail(sensor: Sensor, text: string): void {
   if (el) el.textContent = text;
 }
 
+// ─── EEG ch1 ring buffer + canvas ──────────────────────────────────────────
+// 마지막 EEG_BUFFER_MAX 샘플(=4s @ 500Hz) 만 유지하는 가벼운 ring buffer.
+// requestAnimationFrame 루프에서 폴리라인 한 줄로 그린다. 차트 라이브러리 X.
+const EEG_BUFFER_MAX = 2000;
+const EEG_Y_MIN = -300; // μV
+const EEG_Y_MAX = 300;
+const eegBuffer: number[] = [];
+
+function pushEegSamples(samples: Float64Array): void {
+  for (const v of samples) eegBuffer.push(v);
+  if (eegBuffer.length > EEG_BUFFER_MAX) {
+    eegBuffer.splice(0, eegBuffer.length - EEG_BUFFER_MAX);
+  }
+}
+
+function drawEeg(): void {
+  const canvas = document.getElementById("eeg-chart") as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  const yRange = EEG_Y_MAX - EEG_Y_MIN;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // 0 μV reference line.
+  ctx.strokeStyle = "#ddd";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const yMid = h - ((0 - EEG_Y_MIN) / yRange) * h;
+  ctx.moveTo(0, yMid);
+  ctx.lineTo(w, yMid);
+  ctx.stroke();
+
+  if (eegBuffer.length === 0) return;
+
+  ctx.strokeStyle = "#0070f3";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < eegBuffer.length; i++) {
+    const x = (i / EEG_BUFFER_MAX) * w;
+    // saturated 샘플(±336,083 μV)이 캔버스 밖으로 나가 안 보이는 걸 막기 위해 clamp.
+    const clamped = Math.max(EEG_Y_MIN, Math.min(EEG_Y_MAX, eegBuffer[i]));
+    const y = h - ((clamped - EEG_Y_MIN) / yRange) * h;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function chartLoop(): void {
+  drawEeg();
+  requestAnimationFrame(chartLoop);
+}
+requestAnimationFrame(chartLoop);
+
 function onEegBytes(data: Uint8Array): void {
   bumpCounter("eeg", data.byteLength);
   const batch = parser.parseEeg(data);
+  pushEegSamples(batch.ch1Uv);
   const last = batch.ch1Uv.length - 1;
   if (last < 0) return;
   setDetail(
@@ -162,5 +221,69 @@ document.getElementById("connect")?.addEventListener("click", () => {
   connect().catch((err: unknown) => {
     console.error(err);
     setStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
+  });
+});
+
+// ─── Replay (디바이스 없이 동작 검증) ─────────────────────────────────────
+// reference-py/tests/fixtures/real{1,}/{eeg,ppg,acc}.txt 의 dump 를 fetch 후
+// on*Bytes 파이프라인에 흘려보낸다 — 라이브 BLE 와 같은 경로.
+
+async function replayStream(
+  url: string,
+  handler: (data: Uint8Array) => void,
+  cadenceMs: number,
+): Promise<void> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+  const txt = await res.text();
+  const lines = txt.split("\n").filter((l) => l.length > 0);
+  for (const line of lines) {
+    const hex = line.split("\t")[1];
+    if (!hex) continue;
+    const matches = hex.match(/.{2}/g);
+    if (!matches) continue;
+    const bytes = Uint8Array.from(matches.map((b) => parseInt(b, 16)));
+    try {
+      handler(bytes);
+    } catch (err) {
+      console.warn(`replay handler failed for ${url}`, err);
+    }
+    await new Promise((r) => setTimeout(r, cadenceMs));
+  }
+}
+
+async function probeFixtureRoot(): Promise<string | null> {
+  // 사용자 spec: real1/ 우선, 없으면 real/. 둘 다 없으면 null.
+  for (const root of [
+    "/reference-py/tests/fixtures/real1",
+    "/reference-py/tests/fixtures/real",
+  ]) {
+    const probe = await fetch(`${root}/eeg.txt`).catch(() => null);
+    if (probe?.ok) return root;
+  }
+  return null;
+}
+
+async function replay(): Promise<void> {
+  setStatus("locating fixtures …");
+  const root = await probeFixtureRoot();
+  if (!root) {
+    setStatus("error: fixture root not reachable (try `npm run dev`)");
+    return;
+  }
+  setStatus(`replaying from ${root} …`);
+  // EEG/PPG/ACC 동시 — 각자 자기 cadence 로. Promise.all 로 모두 끝나면 done.
+  await Promise.all([
+    replayStream(`${root}/eeg.txt`, onEegBytes, 50),
+    replayStream(`${root}/ppg.txt`, onPpgBytes, 560),
+    replayStream(`${root}/acc.txt`, onAccBytes, 1200),
+  ]);
+  setStatus("replay done");
+}
+
+document.getElementById("replay")?.addEventListener("click", () => {
+  replay().catch((err: unknown) => {
+    console.error(err);
+    setStatus(`replay error: ${err instanceof Error ? err.message : String(err)}`);
   });
 });
