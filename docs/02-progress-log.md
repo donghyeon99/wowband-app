@@ -49,6 +49,29 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-02 (저녁) — ui/layout.ts (Header + Footer + Tabs 헬퍼) [PROGRESS]
+
+**무엇을**: sensor-dashboard `App.tsx` 의 sticky 탭 시스템 + `Header.tsx` + `Footer.tsx` 를 vanilla TS DOM 헬퍼로 단일 파일에 통합. main.ts 통합은 step 2.
+
+**3 헬퍼**:
+- `createHeader(container, { onConnect, onReplay })`: 좌측 brand (그라디언트 로고 + 제품명 + 부제) + 우측 status pill / battery pill / Connect / Replay. sticky top z-50, backdrop blur. sensor-dashboard `Header.tsx` 의 `bg-bg-card/90 border-b sticky top-0` 매핑.
+- `createTabs(container, tabs[], onChange)`: sensor-dashboard `App.tsx` 의 TabsList 미러. shadcn 의존성 없이 vanilla CSS 토글 — active = 흰 배경 / 검정 텍스트, inactive = neutral-700 / 회색. sticky top-64 z-40.
+- `createFooter(container)`: Messages 카운트 + Rate (msg/s) + Status (Live/Idle/Offline) + 버전 라벨. sensor-dashboard `Footer.tsx` 미러. Zustand 의존성 제거하고 인스턴스 내부 state + `setInterval` 1s 로 rate 자동 갱신.
+
+**가드레일**:
+- shadcn / Radix / Tailwind / React 도입 0
+- 새 dependency 0
+- 새 폴더 0 (`src/ui/layout.ts` 단일 파일)
+- 기존 view 파일 (eeg/ppg/acc-view) 수정 0
+
+**검증**: `tsc --noEmit` 통과. `npm run test:run` 16/16 GREEN. `npm run build` 통과.
+
+**다음 단계**: main.ts + index.html 재구성 — Header / Tabs / Footer 마운트 + 활성 탭 외 view 컨테이너 hide.
+
+**참조**: `src/ui/layout.ts`, sensor-dashboard `components/layout/{Header,Footer}.tsx` + `App.tsx`.
+
+---
+
 ### 2026-05-02 — main.ts wiring + index.html 레이아웃 갱신 [PROGRESS]
 
 **무엇을**: 자율모드 마지막 커밋 — sensor-dashboard 형식 frontend 미러 완료. 3 view 인스턴스화 + index.html 레이아웃 교체.
