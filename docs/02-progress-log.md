@@ -36,15 +36,91 @@
 
 spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
-- [ ] **Q1**: ACC 6-byte 레이아웃 — 가설 A(8-bit×3+filler) vs B(16-bit LE). 스파이크 덤프로 검증 예정.
-- [ ] **Q6**: 패킷 헤더 timestamp 의미 — 부팅 후 경과시간(상대) vs epoch(절대). 스파이크 첫 패킷 값으로 판별.
+- [x] **Q1**: ACC 6-byte 레이아웃 — **가설 B (16-bit LE) 확정**. ↓ 2026-05-01 [VERIFIED] entry 참조.
+- [x] **Q6**: 패킷 헤더 timestamp 의미 — **boot-relative uptime 확정**. ↓ 같은 [VERIFIED] entry.
+- [x] **Q7** (신규): EEG nominal fs — **500Hz 확정** (Kotlin SDK 250Hz 오류). ↓ 같은 [VERIFIED] entry.
+- [ ] **Q8** (신규): PPG stream 조기 종료 — 헤드밴드 착용 시 0 packet, 미착용 시 7 packet 후 stop. parser 비차단, ble.py 단계에서 재구독/모니터링 처리.
 - [ ] **Q2**: leadOff 비트마스크 vs 단순 플래그. 장기 관측 필요.
 - [ ] **Q3**: PPG raw 단위 변환 필요성. MVP 범위 밖, 후순위.
+- [ ] **Q4**: Battery notification 빈도 — 30초 spike 동안 0건. level-change 트리거 추정. 비차단.
 - [ ] **Q5**: EEG 외 추가 펌웨어 명령 존재. 후순위.
 
 ---
 
 ## Log
+
+### 2026-05-01 (오후) — test_parser.py + models.py 새 spec 반영 [PROGRESS]
+
+**무엇을**: spec 갱신에 맞춰 두 파일 동기화.
+- `linkband/models.py`: `EegBatch.fs` default 250 → **500**. `AccBatch` docstring: 가설 A/B 양쪽 수용 → "16-bit LE 확정 (Kotlin LSB 누락 버그)" 로 갱신.
+- `tests/test_parser.py`:
+  - `acc_packet` 빌더: filler-기반 → 16-bit LE 기반 (axis 당 `int.to_bytes(2, "little", signed=True)`).
+  - `TestAccHypothesisA` → `TestAccDecode16LE`. 가설 B 검증으로 재작성: LSB+MSB 양쪽 영향 확인, signed 16-bit min(`-32768`)/`-1` 케이스.
+  - 통합 테스트 3개: 합성 → **실 fixture (`EEG_REAL_LINE1` / `PPG_REAL_LINE1` / `ACC_REAL_LINE1`)** 로 교체. 모두 dump line 1 과 byte-exact 일치 검증 완료.
+  - 타임스탬프 연속성: `1/250` → `1/500` step.
+  - boundary 테스트(μV·부호확장·lead_off)는 그대로 유지.
+
+**검증**: `uv run ruff check` 전부 통과. `uv run pytest` 는 의도된 RED 상태 — `linkband.parser` 미존재로 collection ImportError. import 정렬은 parser.py 생성 후 자동 정상화 예정 (현재 ruff 가 parser 를 third-party 로 분류).
+
+**다음 단계**: `linkband/parser.py` 본체 작성 → GREEN 전환.
+
+**참조**: `linkband/models.py`, `tests/test_parser.py`.
+
+---
+
+### 2026-05-01 (오후) — spec §7 / §9.1 / §13 / §17 실측 반영 [DECISION]
+
+**무엇을**: 실 디바이스 dump 검증 결과를 사양서에 반영.
+- §7 EEG 표: 샘플레이트 250 Hz → **500 Hz** (실측 근거 — cadence 50ms × 25 samples). 1 패킷 시간 100ms → 50ms.
+- §9.1 ACC 레이아웃: 검증 필요 → **16-bit LE 확정**. 본문 재작성, Kotlin SDK 의 LSB 누락 버그 명시.
+- §13 EegBatch: `fs: int = 250` → `500`. Q1.5 텍스트 "가설 A↔B 한 줄 교체" → "16-bit LE 실측 확정".
+- §17 표 재구성: Q1✅(B), Q6✅(boot), Q7✅ 신규(500Hz), Q8⚠️ 신규(PPG stop-early). 검증 데이터 위치(`tests/fixtures/real/`) 명시.
+- 마지막 갱신일 메모.
+
+**결정 영향**: DSP/메트릭 단계의 모든 EEG 처리(필터 cutoff, FFT 윈도우, BPM 추정 등)가 fs=500 기준으로 설계됨. fs 변경은 §13 잠금 사양에 직접 영향은 없으나(int 필드 default 만 변경) 다운스트림에 큰 영향. PPG fs=50 / ACC fs=25 는 spec 그대로 유지 (실측 26.8Hz 는 +7% 편차로 수용 가능).
+
+**참조**: spec `docs/01-protocol-spec.md` §7, §9.1, §13, §17 (commit 미포함, working tree 만).
+
+---
+
+### 2026-05-01 (오후) — Q1·Q6·Q7 실 디바이스 데이터로 잠금 [VERIFIED]
+
+**무엇을**: 헤드밴드 LXB-0263003F 의 spike dump (3차례 실행) 데이터로 미해결 질문 검증.
+
+**검증 결과**:
+
+- **Q1 (ACC 레이아웃) = 16-bit LE 확정**.
+  실측 ACC 샘플 (책상 위 정지) bytes `00 39 00 07 00 e0` → hyp B: x=14592, y=1792, z=−8192. magnitude ≈ 16800, ±2g 16-bit IMU 의 1g 중력 벡터와 정합. 가설 A (Kotlin parity, 인덱스 1/3/5 만 s8) 로 디코드 시 모든 샘플이 (0, 0, 0) — 명백히 false. Kotlin SDK `SensorDataParser.kt:187–189` 가 LSB(인덱스 0/2/4) 를 누락한 버그.
+
+- **Q6 (헤더 timestamp) = boot-relative uptime 확정**.
+  EEG line 1 헤더 `95200700` LE u32 = 0x00072095 = 467605 ticks @ 32.768 kHz = **14.27 초**. 2026-05-01 epoch wall-clock 은 ~1.78×10⁹ s 라 32-bit u32 에 못 들어감 (overflow). 14초 값은 디바이스 부팅 후 경과시간으로만 설명 가능.
+
+- **Q7 (EEG nominal fs) = 500 Hz 확정 (신규 발견)**.
+  정상 패킷 cadence = 헤더 timestamp 간격 1636 ticks @ 32.768 kHz = **49.93 ms**. 25 samples / 50ms = **500 Hz**. spec/Kotlin SDK 의 `eegSampleRate=250.0` 은 오류. 30초 스트리밍 평균 effective fs ≈ 457 Hz (BLE drop 으로 가끔 100ms gap, nominal 은 500). 인접 패킷 간 sample 값에 overlap 없음 → 25 distinct samples per 50ms 확인.
+
+**부수 관찰** (Q8 신규 미해결):
+- PPG: 책상 위 19KB(54 packets) → 착용 시 0 byte. 펌웨어 quality-check 추정. parser 비차단, ble.py 에서 재구독 처리 항목으로 분리.
+- Battery: 30초 동안 0 packet — level-change 트리거. 비차단.
+- ACC fs: 측정 26.8Hz vs spec 25Hz, +7% 편차 — crystal 또는 firmware sample-period 미세 차. 수용.
+
+**다음 단계**: 본 검증으로 spec §7, §9.1, §13, §17 갱신 (별도 [DECISION] entry 참조). models.py·test_parser.py 동기화 (별도 [PROGRESS] entry 참조). 그 뒤 parser.py 본체 → GREEN.
+
+**참조**: `tests/fixtures/real/{eeg,ppg,acc,battery}.txt` (line 1, gitignore 됨), spec §7 §9.1 §17.
+
+---
+
+### 2026-05-01 (오후) — spike_dump.py 강건성 패치 [FIX]
+
+**무엇을**: 첫 worn-band 실행에서 streaming 6-7s 후 device disconnect → 마지막 `b"stop"` write 가 `BleakError: Not connected` 로 traceback 발생. 파일은 line-buffered + ExitStack 으로 닫혀 있어 데이터 손실은 없었지만 출력이 지저분함.
+
+**수정**:
+- `BleakClient(dev, disconnected_callback=_on_disconnect)` 추가 — 끊김 시점 즉시 `!! BLE disconnected (usec=...)` 출력.
+- 마지막 stop write 를 `try/except BleakError` 로 감싸서 cleanup 단계 실패가 traceback 안 뱉음.
+- `try/finally` 파일 close → `contextlib.ExitStack` 으로 통합 (ruff SIM115 만족 + 라인 수 51).
+
+**참조**: `linkband/spike_dump.py` (51줄, 46줄에서 +5).
+
+---
 
 ### 2026-05-01 — BLE 스파이크 코드 작성 [PROGRESS]
 
