@@ -49,6 +49,53 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-02 (저녁) — VisualizerHeader (제목 + Streaming/SignalQuality 배지) [PROGRESS]
+
+**무엇을**: sensor-dashboard `components/visualizer/VisualizerHeader.tsx` 미러링. 자율모드 마지막 커밋 (3/3).
+
+**`createVisualizerHeader(container)`** 추가 (src/ui/layout.ts):
+- 좌측: "Visualizer" h1 (1.45rem, weight 500) + "Real-time sensor data visualization" 부제. 폰트 크기·웨이트 sensor-dashboard 와 동일.
+- 우측: StreamingBadge (Connect 후 라이브 시 teal 강조, 평소 회색) + SignalQualityBadge (placeholder).
+- API: `setStreaming("streaming"|"idle")` + `setSignalQuality("excellent"|"good"|"warning"|"bad"|null)`.
+
+**의도된 미반영** (가드레일):
+- **ThemeSwitcher**: 우리는 단일 다크 테마 — skip.
+- **SignalQuality**: sensor-dashboard 의 `useSignalQuality()` 훅은 DSP 결과 (`signalScore`) 에 의존. DSP 가 아직 없으므로 항상 `null` 로 호출 → "Signal Quality: —" 회색 placeholder. DSP 도착 시 4-level (excellent/good/warning/bad) 갱신 가능하도록 API 만 마련.
+- **useConnectionStore (Zustand)**: 우리는 main.ts 의 setStatus 흐름에서 `setStreaming` 호출.
+
+**main.ts 변경**:
+- `#visualizer-header-mount` div 추가 (index.html).
+- `createVisualizerHeader(visualizerHeaderMount)` — Header 와 Tabs 사이에 normal flow (sticky 아님, sensor-dashboard 의 sticky 처리는 단순화).
+- `setStatus(text)` 가 streaming → `setStreaming("streaming")`, 그 외 → `setStreaming("idle")` 도 함께 호출.
+
+**검증**:
+- `tsc --noEmit` 통과
+- `npm run test:run` 16/16 GREEN
+- `npm run build` 통과 (HTML 1.26 KB, JS 533.81 KB / gzip 179 KB)
+- Vite dev probe: `/` 200, **7 mount points 모두 존재** (header / visualizer-header / tabs / footer / eeg / ppg / acc).
+
+**가드레일 최종 점검**:
+- 새 폴더 0 (`src/ui/layout.ts` 단일 파일에 4 helper)
+- 새 dependency 0 (echarts 그대로)
+- 기존 view 파일 (eeg/ppg/acc-view) 수정 0
+- shadcn / Radix / Tailwind / React / Zustand 도입 0
+- DSP 시작 0 — placeholder 만
+
+**사용자 검증 (돌아오시면)**:
+`npm run dev` → http://localhost:5173 → 다음 동작 확인:
+1. 상단 sticky **Header** — brand + status pill + battery pill + Connect/Replay
+2. 그 아래 **VisualizerHeader** — "Visualizer" 제목 + 부제 + Streaming/SignalQuality 배지 (둘 다 회색 placeholder)
+3. 그 아래 sticky **Tabs** — EEG / PPG / ACC, 활성 탭 흰색
+4. 활성 탭의 view 만 보임. 탭 클릭 시 즉시 스위치 (비활성 탭도 background 데이터 받아 buffer 채워둠 → 전환 시 그래프 이미 그려져 있음)
+5. 하단 **Footer** — Messages 카운트 + Rate (msg/s) + Status (Live/Idle/Offline) + 버전 라벨
+6. Replay 클릭 → 모든 탭에 데이터 흐름. 탭 전환으로 각 sensor view 확인 가능.
+
+**다음 단계 (사용자 결정)**: DSP — sensor-dashboard `src/lib/dsp/` (TS native) 포팅으로 placeholder 패널들 활성화. SignalQuality 도 함께 채워짐.
+
+**참조**: `src/ui/layout.ts`, `src/main.ts`, `index.html`, sensor-dashboard `components/visualizer/VisualizerHeader.tsx` + `StreamingBadge.tsx` + `SignalQualityBadge.tsx`.
+
+---
+
 ### 2026-05-02 (저녁) — Tabs + Header + Footer 통합, 활성 탭만 표시 [PROGRESS]
 
 **무엇을**: layout.ts 의 헬퍼들을 main.ts 에 wiring + index.html 재구성. 3 sensor 가 동시에 펼쳐지던 구조 → sensor-dashboard 처럼 탭 시스템으로 한 번에 하나만 보임.

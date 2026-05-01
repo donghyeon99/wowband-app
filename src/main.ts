@@ -16,7 +16,12 @@
 import { Parser, parseBattery } from "./linkband/parser";
 import { createAccView } from "./ui/acc-view";
 import { createEegView } from "./ui/eeg-view";
-import { createFooter, createHeader, createTabs } from "./ui/layout";
+import {
+  createFooter,
+  createHeader,
+  createTabs,
+  createVisualizerHeader,
+} from "./ui/layout";
 import { createPpgView } from "./ui/ppg-view";
 import {
   ACC_NOTIFY,
@@ -38,6 +43,7 @@ const parser = new Parser();
 // ─── Mount layout chrome ───────────────────────────────────────────────────
 
 const headerMount = document.getElementById("header-mount");
+const visualizerHeaderMount = document.getElementById("visualizer-header-mount");
 const tabsMount = document.getElementById("tabs-mount");
 const footerMount = document.getElementById("footer-mount");
 const eegContainer = document.getElementById("eeg-container");
@@ -45,6 +51,7 @@ const ppgContainer = document.getElementById("ppg-container");
 const accContainer = document.getElementById("acc-container");
 if (
   !headerMount ||
+  !visualizerHeaderMount ||
   !tabsMount ||
   !footerMount ||
   !eegContainer ||
@@ -68,6 +75,9 @@ const header = createHeader(headerMount, {
     });
   },
 });
+
+const visualizerHeader = createVisualizerHeader(visualizerHeaderMount);
+visualizerHeader.setSignalQuality(null); // DSP 도착 전엔 항상 placeholder.
 
 const footer = createFooter(footerMount);
 
@@ -108,10 +118,17 @@ const accView = createAccView(accContainer);
 
 function setStatus(text: string): void {
   header.setStatus(text);
-  // Footer status pill: streaming = live, disconnected = offline, 그 외 = idle.
-  if (text.startsWith("streaming")) footer.setStatus("live");
-  else if (text.toLowerCase().includes("disconnect")) footer.setStatus("offline");
-  else footer.setStatus("idle");
+  // Footer + Visualizer header streaming badge: streaming = live, 그 외 = idle/offline.
+  if (text.startsWith("streaming")) {
+    footer.setStatus("live");
+    visualizerHeader.setStreaming("streaming");
+  } else if (text.toLowerCase().includes("disconnect")) {
+    footer.setStatus("offline");
+    visualizerHeader.setStreaming("idle");
+  } else {
+    footer.setStatus("idle");
+    visualizerHeader.setStreaming("idle");
+  }
 }
 
 function setBattery(text: string): void {

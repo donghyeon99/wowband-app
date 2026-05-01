@@ -233,6 +233,129 @@ export function createTabs(
   };
 }
 
+// ─── Visualizer Header ────────────────────────────────────────────────────
+
+export type VisualizerStreamingState = "streaming" | "idle";
+export type VisualizerSignalQuality = "excellent" | "good" | "warning" | "bad" | null;
+
+export interface VisualizerHeaderHandle {
+  readonly element: HTMLElement;
+  /** Connect 후 데이터가 흐를 때 "Streaming" 배지 표시. */
+  setStreaming(state: VisualizerStreamingState): void;
+  /** SignalQuality 배지 — DSP 가 도착하기 전엔 항상 null (placeholder). */
+  setSignalQuality(quality: VisualizerSignalQuality): void;
+}
+
+const QUALITY_LABEL: Record<NonNullable<VisualizerSignalQuality>, string> = {
+  excellent: "Signal Quality: Excellent",
+  good: "Signal Quality: Good",
+  warning: "Signal Quality: Warning",
+  bad: "Signal Quality: Bad",
+};
+
+const QUALITY_BG: Record<NonNullable<VisualizerSignalQuality>, string> = {
+  excellent: "#14b8a6",
+  good: "#3b82f6",
+  warning: "#f59e0b",
+  bad: "#ef4444",
+};
+
+/**
+ * sensor-dashboard `components/visualizer/VisualizerHeader.tsx` 미러.
+ *
+ * 좌측: "Visualizer" 제목 + 부제. 우측: StreamingBadge + SignalQualityBadge.
+ *
+ * 미반영 항목 (의도된 placeholder):
+ *   - ThemeSwitcher: 우리는 단일 다크 테마 — skip.
+ *   - SignalQuality: `useSignalQuality()` 훅이 DSP 결과 (`signalScore`) 에 의존.
+ *     DSP 가 아직 없으므로 외부에서 setSignalQuality(null) 고정 — "Signal
+ *     Quality: —" 로 회색 placeholder. DSP 도착 시 setSignalQuality("excellent"
+ *     | "good" | "warning" | "bad") 로 갱신 가능.
+ */
+export function createVisualizerHeader(container: HTMLElement): VisualizerHeaderHandle {
+  const wrapper = document.createElement("div");
+  wrapper.style.cssText = `
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem 0.75rem 1.5rem;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  `;
+
+  const left = document.createElement("div");
+  const title = document.createElement("h1");
+  title.textContent = "Visualizer";
+  title.style.cssText = `
+    margin: 0;
+    font-size: 1.45rem;
+    font-weight: 500;
+    color: ${uiColors.textPrimary};
+    letter-spacing: -0.01em;
+  `;
+  left.appendChild(title);
+
+  const sub = document.createElement("p");
+  sub.textContent = "Real-time sensor data visualization";
+  sub.style.cssText = `
+    margin: 0.15rem 0 0 0;
+    font-size: 0.85rem;
+    color: ${uiColors.textSecondary};
+  `;
+  left.appendChild(sub);
+  wrapper.appendChild(left);
+
+  const right = document.createElement("div");
+  right.style.cssText = "display: flex; align-items: center; gap: 0.6rem;";
+
+  // StreamingBadge — 데이터 흐를 때 강조, 평소엔 회색.
+  const streamingBadge = document.createElement("span");
+  streamingBadge.textContent = "Streaming";
+  streamingBadge.style.cssText = `
+    padding: 0.3rem 0.7rem;
+    border-radius: 9999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: ${uiColors.bgElevated};
+    color: ${uiColors.textMuted};
+    border: 1px solid ${uiColors.border};
+    transition: background 0.2s, color 0.2s;
+  `;
+  right.appendChild(streamingBadge);
+
+  // SignalQualityBadge — placeholder.
+  const qualityBadge = document.createElement("span");
+  qualityBadge.textContent = "Signal Quality: —";
+  qualityBadge.style.cssText = streamingBadge.style.cssText;
+  right.appendChild(qualityBadge);
+
+  wrapper.appendChild(right);
+  container.appendChild(wrapper);
+
+  return {
+    element: wrapper,
+    setStreaming(state: VisualizerStreamingState): void {
+      const live = state === "streaming";
+      streamingBadge.style.background = live ? "#14b8a6" : uiColors.bgElevated;
+      streamingBadge.style.color = live ? "#0a0a0e" : uiColors.textMuted;
+      streamingBadge.style.borderColor = live ? "#14b8a6" : uiColors.border;
+    },
+    setSignalQuality(quality: VisualizerSignalQuality): void {
+      if (quality === null) {
+        qualityBadge.textContent = "Signal Quality: —";
+        qualityBadge.style.background = uiColors.bgElevated;
+        qualityBadge.style.color = uiColors.textMuted;
+        qualityBadge.style.borderColor = uiColors.border;
+        return;
+      }
+      qualityBadge.textContent = QUALITY_LABEL[quality];
+      qualityBadge.style.background = QUALITY_BG[quality];
+      qualityBadge.style.color = "#0a0a0e";
+      qualityBadge.style.borderColor = QUALITY_BG[quality];
+    },
+  };
+}
+
 // ─── Footer ────────────────────────────────────────────────────────────────
 
 export type FooterStatusKind = "live" | "idle" | "offline";
