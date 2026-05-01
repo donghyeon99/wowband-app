@@ -49,6 +49,34 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-01 (저녁) — src/linkband/models.ts 작성, P0 첫 TS 항목 [PROGRESS]
+
+**무엇을**: 새 구조의 P0 첫 항목인 `src/linkband/models.ts` (91줄) 작성. Python reference (`reference-py/linkband/models.py`) 의 dataclass 4개 (`EegBatch` / `PpgBatch` / `AccBatch` / `BatteryStatus`) 를 TS interface + typed array 조합으로 미러링.
+
+**매핑 결정**:
+- 표기: `t_device → tDevice` 등 camelCase (TS 관용). 의미 동일.
+- dtype: `np.float64 → Float64Array`, `np.int32 → Int32Array`, `np.int16 → Int16Array`, `np.uint8 → Uint8Array`, `np.bool → boolean[]` (Bool typed array 없음 — 25개 boxed bool 의 GC 비용은 무시 수준).
+- `fs` 필드: 리터럴 타입 (`fs: typeof EEG_FS`) — 컴파일 타임에 500/50/25 가 아닌 값을 거부. parser 가 항상 정확한 fs 를 박도록 강제.
+- 모듈 레벨 상수 `EEG_FS=500`, `PPG_FS=50`, `ACC_FS=25` export. 학생/parser 양쪽에서 import 해서 사용.
+
+**spec/Python 정합 확인**:
+- 필드 구성: 100% 일치 (이름만 camelCase).
+- dtype 의미: 100% 일치.
+- `EegBatch.fs = 500` (Q7 잠금 반영), `AccBatch` 16-bit LE 의미 docstring 명시.
+
+**검증**: `npx tsc --noEmit` 통과. `npm run build` → dist/ 정상 (main.ts 가 아직 models.ts 를 안 import 하므로 번들 크기 변동 없음, tree-shaken — 의도한 동작).
+
+**다음 단계**: `src/linkband/parser.ts`. `reference-py/linkband/parser.py` (15/15 GREEN) 를 numerical reference 로 포팅. DataView 기반 byte 처리:
+- 헤더 LE u32 → `view.getUint32(0, true) / 32768`
+- EEG 24-bit BE signed → `(view.getUint8(o) << 16 | view.getUint8(o+1) << 8 | view.getUint8(o+2))` + sign-ext 또는 `(view.getInt32(o-1) >> 8)` 트릭
+- PPG 24-bit BE unsigned → 마스크 조합 (Python 의 자연 비음수 처리 미러)
+- ACC 16-bit LE signed → `view.getInt16(o, true)` × 3
+- 보간 시각: `Parser` 클래스 인스턴스 상태로 마지막 샘플 시각 추적 (Python 그대로)
+
+**참조**: `src/linkband/models.ts`, `reference-py/linkband/models.py` (정답지), spec §13.
+
+---
+
 ### 2026-05-01 (저녁) — 레포 구조 재배치: TS at root, Python → reference-py/ [PROGRESS]
 
 **무엇을**: 사용자 검토 후 (A) 안 채택 — TS 가 primary 인데 root 가 Python 프로젝트로 보이는 비대칭 해소. 모든 Python 자산을 `reference-py/` 안으로 self-contained 격리, TS 자산은 root 로 승격.
