@@ -1,41 +1,55 @@
 /**
  * EEG view — sensor-dashboard `EEGVisualizer.tsx` 의 전체 레이아웃을 vanilla TS 로 미러링.
  *
- * 구조 (sensor-dashboard 동일):
+ * 구조 (sensor-dashboard 동일, DSP wired):
  *   1. Hero card        — "🧠 EEG Brain Wave Analysis" + 설명
- *   2. 2-col Row        — Ch1 RawData (FP1) | Ch2 RawData (FP2). 각 카드 안에:
- *                          h3 + 설명 + LeadOff banner + Saturated banner + Chart
- *   3. 2-col Row        — Ch1 SQI | Ch2 SQI placeholder
- *   4. 2-col Row        — Power Spectrum | Band Power placeholder
- *   5. Full-width       — EEG Analysis Indices placeholder
+ *   2. 2-col Row        — Ch1 Filtered (FP1) | Ch2 Filtered (FP2). 각 카드 안:
+ *                          h3 + 설명 + LeadOff banner + Saturated banner + Filtered chart
+ *   3. 2-col Row        — Ch1 SQI | Ch2 SQI (SQI 0-100% 라인 차트)
+ *   4. 2-col Row        — Power Spectrum (DFT) | Band Power cards (Δ/θ/α/β/γ)
+ *   5. Full-width       — EEG Analysis Indices (7 cards: focus/relaxation/stress 등)
  *
- * DSP 의존 패널 (3, 4, 5) 는 placeholder. DSP 도착 시 동일 카드에 차트 init.
+ * Filter chain: notch 60Hz → HP 1Hz → LP 45Hz (sensor-dashboard `eegPipeline.ts` 와 동일,
+ * fs=500Hz 로 갱신). 1초 transient 동안 차트 0 표시.
  *
  * 외부 인터페이스:
  *     const view = createEegView(container)
  *     view.onBatch(eegBatch)
+ *     view.resize()
  *     view.dispose()
  */
+import {
+  type EegChannelFilter,
+  EEG_BANDS,
+  calculateEegSqi,
+  computeEegIndices,
+  computeEegPower,
+  computeSpectrum,
+  createEegChannelFilter,
+  processEegSample,
+} from "../linkband/dsp";
 import { EEG_FS, type EegBatch } from "../linkband/models";
-import { type ChartHandle, buildRealtimeLineOption, createChart } from "./chart";
-import { chartColors, uiColors } from "./theme";
+import {
+  type ChartHandle,
+  buildMultiLineOption,
+  buildRealtimeLineOption,
+  createChart,
+} from "./chart";
+import { createMetricCard, type MetricCardHandle } from "./metric-card";
+import { axisLabelStyle, chartColors, splitLineStyle, uiColors } from "./theme";
 
 const EEG_BUFFER_SIZE = 2000; // ~4s @ 500Hz
-const EEG_WINDOW_SEC = EEG_BUFFER_SIZE / EEG_FS; // = 4 — xAxis 고정 윈도우 (sensor-dashboard appendCap 의 시간 등가)
+const EEG_WINDOW_SEC = EEG_BUFFER_SIZE / EEG_FS; // = 4
 const SATURATION_THRESHOLD_UV = 300_000;
 const STYLE_ID = "eeg-view-style";
 
 export interface EegViewHandle {
   onBatch(batch: EegBatch): void;
-  /** 컨테이너 가시화 직후 호출 — 탭 전환 등으로 0×0 → 정상 size 변할 때 ECharts 가
-   *  새 사이즈로 다시 measure 하도록 강제. */
   resize(): void;
   dispose(): void;
 }
 
-// ─── Style injection (1회) ────────────────────────────────────────────────
-// 2-col grid 는 반응형 (≥1024px 에서만 2열). inline style 로 @media 표현 못 하니
-// 모듈 첫 호출 시 <style> 태그 한 번 주입.
+// ─── Style injection ──────────────────────────────────────────────────────
 function ensureStyles(): void {
   if (document.getElementById(STYLE_ID)) return;
   const s = document.createElement("style");
@@ -50,12 +64,16 @@ function ensureStyles(): void {
     @media (min-width: 1024px) {
       .eeg-grid-2col { grid-template-columns: 1fr 1fr; }
     }
+    .eeg-card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 0.6rem;
+    }
   `;
   document.head.appendChild(s);
 }
 
 // ─── DOM helpers ──────────────────────────────────────────────────────────
-
 function makeCard(): HTMLElement {
   const card = document.createElement("div");
   card.style.cssText = `
@@ -102,26 +120,6 @@ function makeBanner(text: string): HTMLElement {
   return b;
 }
 
-function makePlaceholder(label: string, height: string): HTMLElement {
-  const ph = document.createElement("div");
-  ph.style.cssText = `
-    width: 100%;
-    height: ${height};
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: ${uiColors.bgBase};
-    border: 1px dashed ${uiColors.border};
-    border-radius: 6px;
-    color: ${uiColors.textMuted};
-    font-size: 0.85rem;
-    text-align: center;
-    padding: 0 1rem;
-  `;
-  ph.textContent = `${label} — DSP not yet implemented`;
-  return ph;
-}
-
 interface ChannelCard {
   card: HTMLElement;
   chartHost: HTMLElement;
@@ -133,7 +131,6 @@ function makeChannelCard(title: string, desc: string): ChannelCard {
   const card = makeCard();
   card.appendChild(makeCardTitle(title));
   card.appendChild(makeCardDesc(desc));
-
   const leadOffBanner = makeBanner(
     "⚠ Electrode contact issue (lead-off detected) — signal quality may be degraded",
   );
@@ -142,15 +139,13 @@ function makeChannelCard(title: string, desc: string): ChannelCard {
   );
   card.appendChild(leadOffBanner);
   card.appendChild(saturatedBanner);
-
   const chartHost = document.createElement("div");
   chartHost.style.cssText = "width: 100%; height: 220px;";
   card.appendChild(chartHost);
-
   return { card, chartHost, leadOffBanner, saturatedBanner };
 }
 
-function buildChannelChart(host: HTMLElement, color: string, label: string): ChartHandle {
+function buildFilteredChart(host: HTMLElement, color: string, label: string): ChartHandle {
   return createChart(
     host,
     buildRealtimeLineOption({
@@ -170,6 +165,65 @@ function buildChannelChart(host: HTMLElement, color: string, label: string): Cha
   );
 }
 
+function buildSqiChart(host: HTMLElement, label: string): ChartHandle {
+  return createChart(
+    host,
+    buildRealtimeLineOption({
+      color: chartColors.magnitude, // 노란색 — sensor-dashboard SQI 와 비슷한 톤
+      yName: "SQI %",
+      yMin: 0,
+      yMax: 100,
+      yNameGap: 40,
+      area: true,
+      tooltipFormatter: (params: unknown) => {
+        const arr = params as Array<{ value: [number, number] }>;
+        if (!Array.isArray(arr) || arr.length === 0) return "";
+        const t = arr[0]?.value?.[0] ?? 0;
+        const v = arr[0]?.value?.[1] ?? 0;
+        return `t = ${t.toFixed(2)}s<br/>${label}: ${v.toFixed(0)}%`;
+      },
+    }),
+  );
+}
+
+function buildSpectrumChart(host: HTMLElement): ChartHandle {
+  const handle = createChart(
+    host,
+    buildMultiLineOption({
+      series: [
+        { name: "Ch1", color: chartColors.ch1Filtered, smooth: true },
+        { name: "Ch2", color: chartColors.ch2Filtered, smooth: true },
+      ],
+      yName: "dB",
+      yMin: -40,
+      yMax: 60,
+      yNameGap: 40,
+      tooltipFormatter: (params: unknown) => {
+        const arr = params as Array<{ seriesName: string; value: [number, number] }>;
+        if (!Array.isArray(arr) || arr.length === 0) return "";
+        const f = arr[0]?.value?.[0] ?? 0;
+        const lines = [`${f}Hz`];
+        for (const p of arr) lines.push(`${p.seriesName}: ${p.value[1].toFixed(1)} dB`);
+        return lines.join("<br/>");
+      },
+    }),
+  );
+  // x-axis 를 시간 (s) → 주파수 (Hz) 로 override.
+  handle.chart.setOption({
+    xAxis: {
+      type: "value",
+      name: "Hz",
+      nameLocation: "middle",
+      nameGap: 25,
+      min: 1,
+      max: 45,
+      axisLabel: { ...axisLabelStyle, formatter: (v: number) => `${v}` },
+      splitLine: splitLineStyle,
+    },
+  });
+  return handle;
+}
+
 // ─── createEegView ─────────────────────────────────────────────────────────
 
 export function createEegView(container: HTMLElement): EegViewHandle {
@@ -178,7 +232,7 @@ export function createEegView(container: HTMLElement): EegViewHandle {
   const root = document.createElement("section");
   root.className = "eeg-view-root";
 
-  // (1) Hero card.
+  // (1) Hero.
   const hero = makeCard();
   hero.appendChild(makeCardTitle("🧠 EEG Brain Wave Analysis", 2));
   const heroSub = document.createElement("p");
@@ -188,106 +242,173 @@ export function createEegView(container: HTMLElement): EegViewHandle {
   hero.style.marginBottom = "1.5rem";
   root.appendChild(hero);
 
-  // (2) Ch1/Ch2 RawData 2-col row.
+  // (2) Ch1/Ch2 Filtered 2-col row.
   const row1 = document.createElement("div");
   row1.className = "eeg-grid-2col";
   const ch1 = makeChannelCard(
     "🔧 Ch1 Filtered EEG Signal (FP1)",
-    "Channel 1 (FP1) signal processing — 60Hz notch + 1-45Hz bandpass filter (DSP pending; raw signal shown for now).",
+    "Channel 1 (FP1) — 60Hz notch + 1-45Hz bandpass filter (DSP active).",
   );
   const ch2 = makeChannelCard(
     "🔧 Ch2 Filtered EEG Signal (FP2)",
-    "Channel 2 (FP2) signal processing — 60Hz notch + 1-45Hz bandpass filter (DSP pending; raw signal shown for now).",
+    "Channel 2 (FP2) — 60Hz notch + 1-45Hz bandpass filter (DSP active).",
   );
   row1.appendChild(ch1.card);
   row1.appendChild(ch2.card);
   root.appendChild(row1);
 
-  // (3) SQI 2-col placeholder.
+  // (3) SQI 2-col row (DSP active).
   const row2 = document.createElement("div");
   row2.className = "eeg-grid-2col";
-  for (const [title, desc] of [
-    ["📈 Ch1 Signal Quality Index (SQI)", "Channel 1 (FP1) electrode contact and signal quality monitoring."],
-    ["📈 Ch2 Signal Quality Index (SQI)", "Channel 2 (FP2) electrode contact and signal quality monitoring."],
-  ] as const) {
-    const c = makeCard();
-    c.appendChild(makeCardTitle(title));
-    c.appendChild(makeCardDesc(desc));
-    c.appendChild(makePlaceholder("SQI chart", "180px"));
-    row2.appendChild(c);
-  }
+  const sqi1Card = makeCard();
+  sqi1Card.appendChild(makeCardTitle("📈 Ch1 Signal Quality Index (SQI)"));
+  sqi1Card.appendChild(
+    makeCardDesc(
+      "70% amplitude + 30% frequency-variance score on filtered Ch1 (window 0.5s, threshold 150μV).",
+    ),
+  );
+  const sqi1Host = document.createElement("div");
+  sqi1Host.style.cssText = "width: 100%; height: 180px;";
+  sqi1Card.appendChild(sqi1Host);
+  row2.appendChild(sqi1Card);
+
+  const sqi2Card = makeCard();
+  sqi2Card.appendChild(makeCardTitle("📈 Ch2 Signal Quality Index (SQI)"));
+  sqi2Card.appendChild(
+    makeCardDesc(
+      "70% amplitude + 30% frequency-variance score on filtered Ch2 (window 0.5s, threshold 150μV).",
+    ),
+  );
+  const sqi2Host = document.createElement("div");
+  sqi2Host.style.cssText = "width: 100%; height: 180px;";
+  sqi2Card.appendChild(sqi2Host);
+  row2.appendChild(sqi2Card);
   root.appendChild(row2);
 
-  // (4) Power Spectrum + Band Power placeholders.
+  // (4) Power Spectrum + Band Power 2-col row.
   const row3 = document.createElement("div");
   row3.className = "eeg-grid-2col";
-  for (const [title, desc, label] of [
-    [
-      "🌈 Power Spectrum (1-45Hz)",
-      "Ch1, Ch2 frequency-domain EEG signal analysis.",
-      "Power Spectrum",
-    ],
-    [
-      "🎯 Frequency Band Power",
-      "Real-time band-level power — Delta, Theta, Alpha, Beta, Gamma.",
-      "Band Power cards",
-    ],
-  ] as const) {
-    const c = makeCard();
-    c.appendChild(makeCardTitle(title));
-    c.appendChild(makeCardDesc(desc));
-    c.appendChild(makePlaceholder(label, "200px"));
-    row3.appendChild(c);
-  }
+  const spectrumCard = makeCard();
+  spectrumCard.appendChild(makeCardTitle("🌈 Power Spectrum (1-45Hz)"));
+  spectrumCard.appendChild(
+    makeCardDesc("Ch1, Ch2 frequency-domain EEG signal analysis (DFT, DC-removed)."),
+  );
+  const spectrumHost = document.createElement("div");
+  spectrumHost.style.cssText = "width: 100%; height: 220px;";
+  spectrumCard.appendChild(spectrumHost);
+  row3.appendChild(spectrumCard);
+
+  const bandCard = makeCard();
+  bandCard.appendChild(makeCardTitle("🎯 Frequency Band Power"));
+  bandCard.appendChild(
+    makeCardDesc(
+      "Real-time band-level power (Morlet wavelet on linkband-style filtered EEG, dB).",
+    ),
+  );
+  const bandGrid = document.createElement("div");
+  bandGrid.className = "eeg-card-grid";
+  bandCard.appendChild(bandGrid);
+  row3.appendChild(bandCard);
   root.appendChild(row3);
 
-  // (5) Full-width Indices placeholder.
+  // (5) Full-width Indices.
   const idxCard = makeCard();
   idxCard.appendChild(makeCardTitle("🧠 EEG Analysis Indices"));
   idxCard.appendChild(
-    makeCardDesc("Real-time EEG analysis — focus, relaxation, stress, and 4 more indices."),
+    makeCardDesc(
+      "Real-time EEG analysis — focus/relaxation/stress + 4 more (own derivation from band power; spec §17 미해결 — sensor-dashboard 의 외부 SDK 값과 numerical 차이 가능).",
+    ),
   );
-  idxCard.appendChild(makePlaceholder("EEG Analysis Indices", "180px"));
+  const idxGrid = document.createElement("div");
+  idxGrid.className = "eeg-card-grid";
+  idxCard.appendChild(idxGrid);
   root.appendChild(idxCard);
 
   container.appendChild(root);
 
-  // ─── Charts (single-line each) ──────────────────────────────────────────
-  const chart1 = buildChannelChart(ch1.chartHost, chartColors.ch1Filtered, "Ch1 (FP1)");
-  const chart2 = buildChannelChart(ch2.chartHost, chartColors.ch2Filtered, "Ch2 (FP2)");
+  // ─── Charts ──────────────────────────────────────────────────────────────
+  const chart1 = buildFilteredChart(ch1.chartHost, chartColors.ch1Filtered, "Ch1 (FP1)");
+  const chart2 = buildFilteredChart(ch2.chartHost, chartColors.ch2Filtered, "Ch2 (FP2)");
+  const sqi1Chart = buildSqiChart(sqi1Host, "Ch1 SQI");
+  const sqi2Chart = buildSqiChart(sqi2Host, "Ch2 SQI");
+  const spectrumChart = buildSpectrumChart(spectrumHost);
 
-  // ─── Buffers + onBatch ──────────────────────────────────────────────────
+  // ─── Band power + Indices cards ─────────────────────────────────────────
+  const BAND_COLORS: Record<(typeof EEG_BANDS)[number]["key"], string> = {
+    delta: "#8B4513",
+    theta: "#FF8C00",
+    alpha: "#32CD32",
+    beta: "#1E90FF",
+    gamma: "#9400D3",
+  };
+  const bandCards: Record<(typeof EEG_BANDS)[number]["key"], MetricCardHandle> = {
+    delta: createMetricCard(bandGrid, { label: "Delta (1-4Hz)", unit: "dB", dotColor: BAND_COLORS.delta, decimals: 1 }),
+    theta: createMetricCard(bandGrid, { label: "Theta (4-8Hz)", unit: "dB", dotColor: BAND_COLORS.theta, decimals: 1 }),
+    alpha: createMetricCard(bandGrid, { label: "Alpha (8-13Hz)", unit: "dB", dotColor: BAND_COLORS.alpha, decimals: 1 }),
+    beta: createMetricCard(bandGrid, { label: "Beta (13-30Hz)", unit: "dB", dotColor: BAND_COLORS.beta, decimals: 1 }),
+    gamma: createMetricCard(bandGrid, { label: "Gamma (30-45Hz)", unit: "dB", dotColor: BAND_COLORS.gamma, decimals: 1 }),
+  };
+
+  const indexCards = {
+    focusIndex: createMetricCard(idxGrid, { label: "Focus", unit: "dB", dotColor: "#3b82f6", decimals: 2 }),
+    relaxationIndex: createMetricCard(idxGrid, { label: "Relaxation", unit: "dB", dotColor: "#10b981", decimals: 2 }),
+    stressIndex: createMetricCard(idxGrid, { label: "Stress", unit: "dB", dotColor: "#ef4444", decimals: 2 }),
+    cognitiveLoad: createMetricCard(idxGrid, { label: "Cognitive Load", unit: "dB", dotColor: "#a855f7", decimals: 2 }),
+    hemisphericBalance: createMetricCard(idxGrid, { label: "Hemispheric Bal.", unit: "dB", dotColor: "#f59e0b", decimals: 2 }),
+    emotionalStability: createMetricCard(idxGrid, { label: "Emotional Stab.", unit: "dB", dotColor: "#14b8a6", decimals: 2 }),
+    totalPower: createMetricCard(idxGrid, { label: "Total Power", unit: "dB", dotColor: "#6b6b7e", decimals: 1 }),
+  };
+
+  // ─── State (filter + buffers) ────────────────────────────────────────────
+  const filter1: EegChannelFilter = createEegChannelFilter();
+  const filter2: EegChannelFilter = createEegChannelFilter();
+
+  // ch1Buf / ch2Buf: filtered (chart + SQI 입력).
+  // ch1RawBuf / ch2RawBuf: raw μV (spectrum + band power 입력 — sensor-dashboard 와 동일).
   const ch1Buf: number[] = [];
   const ch2Buf: number[] = [];
+  const ch1RawBuf: number[] = [];
+  const ch2RawBuf: number[] = [];
+  const ch1SqiBuf: number[] = [];
+  const ch2SqiBuf: number[] = [];
 
-  function pushAndTrim(buf: number[], values: Float64Array): void {
-    for (const v of values) buf.push(v);
+  function pushAndTrim(buf: number[], v: number): void {
+    buf.push(v);
     if (buf.length > EEG_BUFFER_SIZE) buf.splice(0, buf.length - EEG_BUFFER_SIZE);
   }
 
   return {
     onBatch(batch: EegBatch): void {
-      pushAndTrim(ch1Buf, batch.ch1Uv);
-      pushAndTrim(ch2Buf, batch.ch2Uv);
+      // 샘플 별 filter cascade 적용 — raw 와 filtered 모두 buffer 에 push.
+      const filtered1: number[] = new Array(batch.ch1Uv.length);
+      const filtered2: number[] = new Array(batch.ch2Uv.length);
+      for (let i = 0; i < batch.ch1Uv.length; i++) {
+        const f1 = processEegSample(filter1, batch.ch1Uv[i]);
+        const f2 = processEegSample(filter2, batch.ch2Uv[i]);
+        filtered1[i] = f1;
+        filtered2[i] = f2;
+        pushAndTrim(ch1Buf, f1);
+        pushAndTrim(ch2Buf, f2);
+        pushAndTrim(ch1RawBuf, batch.ch1Uv[i]);
+        pushAndTrim(ch2RawBuf, batch.ch2Uv[i]);
+      }
 
       const fs = batch.fs;
       const ch1Last = Math.max(ch1Buf.length - 1, 0);
       const ch2Last = Math.max(ch2Buf.length - 1, 0);
 
-      // LeadOff: parser 가 채널별 분리 정보 없음 (spec §17 Q2 미해결) — 양쪽 카드에 동일 토글.
+      // LeadOff (parser 가 채널별 분리 정보 없음 — 양쪽 동일).
       const anyLeadOff = batch.leadOff.some((v) => v);
       ch1.leadOffBanner.style.display = anyLeadOff ? "block" : "none";
       ch2.leadOffBanner.style.display = anyLeadOff ? "block" : "none";
 
-      // Saturated: per-channel — ch1Uv 와 ch2Uv 각각 검사.
-      const ch1Sat = batch.ch1Uv.every((v) => Math.abs(v) > SATURATION_THRESHOLD_UV);
-      const ch2Sat = batch.ch2Uv.every((v) => Math.abs(v) > SATURATION_THRESHOLD_UV);
+      // Saturated: filtered 신호 기준 — DSP 후 saturated raw 는 ~0 이라 자연 false.
+      const ch1Sat = filtered1.every((v) => Math.abs(v) > SATURATION_THRESHOLD_UV);
+      const ch2Sat = filtered2.every((v) => Math.abs(v) > SATURATION_THRESHOLD_UV);
       ch1.saturatedBanner.style.display = ch1Sat ? "block" : "none";
       ch2.saturatedBanner.style.display = ch2Sat ? "block" : "none";
 
-      // 좌표는 초 단위 — 가장 오래된 = -(N-1)/fs, 최신 = 0.
-      // chartData 는 buffer 길이 기반 — buffer 차오를수록 좌측으로 grow.
-      // xAxis 는 EEG_WINDOW_SEC 고정 → 빈 좌측 영역은 그냥 비어 있음 (라인 X).
+      // Ch1/Ch2 filtered 차트 갱신.
       const ch1Data: Array<[number, number]> = ch1Buf.map((v, i) => [(i - ch1Last) / fs, v]);
       const ch2Data: Array<[number, number]> = ch2Buf.map((v, i) => [(i - ch2Last) / fs, v]);
       chart1.chart.setOption({
@@ -298,14 +419,65 @@ export function createEegView(container: HTMLElement): EegViewHandle {
         xAxis: { min: -EEG_WINDOW_SEC, max: 0 },
         series: [{ data: ch2Data }],
       });
+
+      // SQI: 전체 filtered buffer 에 대해 계산 → 마지막 batch 길이만큼 SQI buffer 에 append.
+      const sqi1 = calculateEegSqi(ch1Buf);
+      const sqi2 = calculateEegSqi(ch2Buf);
+      const newCount = batch.ch1Uv.length;
+      for (const v of sqi1.slice(-newCount)) pushAndTrim(ch1SqiBuf, v);
+      for (const v of sqi2.slice(-newCount)) pushAndTrim(ch2SqiBuf, v);
+      const sqi1Last = Math.max(ch1SqiBuf.length - 1, 0);
+      const sqi2Last = Math.max(ch2SqiBuf.length - 1, 0);
+      const sqi1Data: Array<[number, number]> = ch1SqiBuf.map((v, i) => [(i - sqi1Last) / fs, v]);
+      const sqi2Data: Array<[number, number]> = ch2SqiBuf.map((v, i) => [(i - sqi2Last) / fs, v]);
+      sqi1Chart.chart.setOption({
+        xAxis: { min: -EEG_WINDOW_SEC, max: 0 },
+        series: [{ data: sqi1Data }],
+      });
+      sqi2Chart.chart.setOption({
+        xAxis: { min: -EEG_WINDOW_SEC, max: 0 },
+        series: [{ data: sqi2Data }],
+      });
+
+      // Power spectrum: raw buffer 에 대해 DFT (sensor-dashboard 와 동일).
+      const ch1Spec = computeSpectrum(ch1RawBuf, fs, 1, 45);
+      const ch2Spec = computeSpectrum(ch2RawBuf, fs, 1, 45);
+      if (ch1Spec.length > 0 || ch2Spec.length > 0) {
+        spectrumChart.chart.setOption({
+          series: [{ data: ch1Spec }, { data: ch2Spec }],
+        });
+      }
+
+      // Band power + Indices: raw buffer 가 충분히 차야 (≥600 samples = 1.2s @500Hz).
+      const power = computeEegPower(ch1RawBuf, ch2RawBuf, fs);
+      if (power) {
+        for (const band of EEG_BANDS) {
+          const avg = (power.bands[band.key].ch1Db + power.bands[band.key].ch2Db) / 2;
+          bandCards[band.key].update(avg);
+        }
+        const idx = computeEegIndices(power);
+        indexCards.focusIndex.update(idx.focusIndex);
+        indexCards.relaxationIndex.update(idx.relaxationIndex);
+        indexCards.stressIndex.update(idx.stressIndex);
+        indexCards.cognitiveLoad.update(idx.cognitiveLoad);
+        indexCards.hemisphericBalance.update(idx.hemisphericBalance);
+        indexCards.emotionalStability.update(idx.emotionalStability);
+        indexCards.totalPower.update(idx.totalPower);
+      }
     },
     resize(): void {
       chart1.chart.resize();
       chart2.chart.resize();
+      sqi1Chart.chart.resize();
+      sqi2Chart.chart.resize();
+      spectrumChart.chart.resize();
     },
     dispose(): void {
       chart1.dispose();
       chart2.dispose();
+      sqi1Chart.dispose();
+      sqi2Chart.dispose();
+      spectrumChart.dispose();
       root.remove();
     },
   };

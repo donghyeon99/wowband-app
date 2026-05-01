@@ -49,6 +49,73 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-02 (밤) — DSP 4/4: eeg-view DSP 와이어링 [PROGRESS]
+
+**무엇을**: DSP placeholder 4개 슬롯을 모두 활성화. `src/ui/eeg-view.ts` 전체 rewrite — filter cascade + SQI + spectrum + band power + indices 통합.
+
+**활성화된 패널**:
+
+1. **Ch1/Ch2 Filtered chart** (Row 2)
+   - 입력이 raw → **filtered** (notch 60Hz → HP 1Hz → LP 45Hz cascade) 로 교체
+   - 채널별 `EegChannelFilter` 인스턴스 view 안에 보관, 각 샘플마다 `processEegSample` 호출
+   - 1초 transient 동안 0 출력 (sensor-dashboard 와 동일)
+   - 카드 설명 "DSP active" 로 갱신
+
+2. **Saturated banner** (filtered 기준)
+   - `filtered.every(|v| > 300_000)` 로 변경 — DSP HP 가 DC 제거하므로 saturated raw 가 ~0 으로 바뀜 → 자연스럽게 false → 배너 OFF
+   - 현실적으로 saturated raw 가 와도 banner 안 뜸 (filter 가 흡수)
+
+3. **SQI 차트** (Row 3, NEW)
+   - 채널별 `calculateEegSqi(filtered_buffer)` 매 batch 호출, 결과의 마지막 batch_len 만큼 SQI buffer 에 append
+   - 0-100% y-range 라인 차트 (area, 노란색)
+
+4. **Power Spectrum 차트** (Row 4 좌, NEW)
+   - `computeSpectrum(rawBuf, fs, 1, 45)` 매 batch 호출 → ch1/ch2 multi-line
+   - X-axis = Hz (1-45), Y-axis = dB (-40 ~ +60)
+   - 시간 axis 가 아닌 frequency axis 라 createChart 후 setOption 으로 override
+
+5. **Band Power cards** (Row 4 우, NEW)
+   - `computeEegPower(ch1RawBuf, ch2RawBuf, fs)` → 5 cards (Δ/θ/α/β/γ)
+   - 각 카드 = `createMetricCard` (avg dB, decimals 1, band 색)
+   - 색: delta brown / theta orange / alpha green / beta blue / gamma purple
+
+6. **EEG Indices cards** (Row 5, NEW)
+   - `computeEegIndices(power)` → 7 cards: focus / relaxation / stress / cognitiveLoad / hemisphericBalance / emotionalStability / totalPower
+   - 카드 설명에 own derivation 명시 — sensor-dashboard 외부 SDK 값과 차이 가능
+
+**Buffer 구조**:
+- `ch1Buf` / `ch2Buf`: filtered (chart + SQI 입력) — size 2000
+- `ch1RawBuf` / `ch2RawBuf`: raw μV (spectrum + band power 입력) — size 2000
+- `ch1SqiBuf` / `ch2SqiBuf`: SQI 0-100 % (SQI chart 입력) — size 2000
+
+**resize / dispose 갱신**: 차트 5개 모두 (chart1/chart2/sqi1Chart/sqi2Chart/spectrumChart).
+
+**가드레일**:
+- 새 폴더 0, 새 dependency 0
+- chart.ts / parser.ts / models.ts / main.ts / layout.ts / ppg-view / acc-view 수정 0
+- DSP 는 이미 step 1-3 에서 작성 — 본 step 은 import + wiring 만
+
+**검증**:
+- `tsc --noEmit` 통과
+- `npm run test:run` 37/37 GREEN (parser 15 + sanity 1 + dsp 21)
+- `npm run build` 통과 (JS 542 → 549.57 KB, +7 KB DSP code 인라인)
+- Vite dev probe: `/`, `/src/ui/eeg-view.ts`, `/src/linkband/dsp.ts` 모두 200
+
+**기대 동작 (사용자 검증)**:
+- `npm run dev` → Replay 클릭, EEG 탭:
+  - Ch1/Ch2 차트: 1초 transient 후 평평한 ~0 라인 (saturated raw → DC 제거 후 0)
+  - Saturated 배너: 자동 OFF (filter 가 saturated 흡수)
+  - SQI 차트: 평평한 신호라 high SQI (filtered ~0, |0-mean|=0 → ampSum=1, var=0 → freqScore=1 → 100%)
+  - Power Spectrum: 평평 (saturated dump 라 진동 성분 없음 → 모든 freq 에서 -100 dB)
+  - Band Power 5 cards: 모두 매우 낮은 dB (saturated raw 라 morlet wavelet 출력 미미)
+  - Indices 7 cards: 의미 있는 실수 값 (NaN 없음)
+
+- 헤드밴드 착용 + Connect → 실 EEG → α/β/θ 등이 spectrum 에 보임, 실 indices 갱신.
+
+**참조**: `src/ui/eeg-view.ts`, `src/linkband/dsp.ts`.
+
+---
+
 ### 2026-05-02 (밤) — DSP 3/4: SQI + EEG indices [PROGRESS]
 
 **무엇을**: `src/linkband/dsp.ts` 에 SQI + 7 EEG analysis indices 추가.
