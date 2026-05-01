@@ -49,6 +49,33 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-01 (저녁) — parser.ts 본체, 15/15 GREEN [PROGRESS]
+
+**무엇을**: `src/linkband/parser.ts` (160+줄) 작성. Python reference (`reference-py/linkband/parser.py`, 15/15 GREEN at be16261) 의 numerical 미러링.
+
+**구성**:
+- 모듈 상수: `TICKS_PER_SEC=32768`, `EEG_VREF/GAIN/RES/UV_FACTOR`, `*_SAMPLE_SIZE`.
+- 헬퍼 (private): `headerSeconds(view)`, `decodeBeS24(view, offset)` (24-bit 부호확장), `decodeBeU24(view, offset)`, `viewOf(data)`.
+- 모듈 export: `_decodeAccSample(buf): [x, y, z]` (16-bit LE), `parseBattery(data)`, `class Parser`.
+- `Parser`: 인스턴스 상태 (`lastEegT/lastPpgT/lastAccT`) 로 보간. `parseEeg/Ppg/Acc` + `reset*Timestamps`.
+
+**핵심 byte 처리 결정**:
+- 헤더 → `view.getUint32(0, true) / 32768`
+- EEG 24-bit BE signed → `(getUint8 << 16 | getUint8 << 8 | getUint8)` + sign-ext 마스크. JS bitwise 가 32-bit signed 라 0xFFFFFF 까지는 양수로 나오는 점 활용.
+- PPG 24-bit BE unsigned → 같은 OR 시프트, sign-ext 단계 생략. `getUint8` 입력이라 자동 비음수.
+- ACC 16-bit LE signed × 3 → `view.getInt16(off, true)` 세 번. native API 가 부호 처리해줌.
+- Float precision: `EEG_UV_FACTOR = 4.033 / 12 / 8388607 * 1e6` 가 Python 결과와 IEEE 754 동일 — `toBeCloseTo(_, 12)` 통과.
+
+**검증**: `npm run test:run` → **15/15 passed in 309ms** (sanity 1 + parser 15 = 16 total). `tsc --noEmit` 통과.
+
+**Note**: 자율모드 prompt 는 "13 cases" 라 적었지만 실제 분포 합 (2+5+2+3+1+2) = 15 가 맞음. Python reference 와도 정합.
+
+**다음 단계**: main.ts 가 raw bytes 를 parser 통과시켜 디코드 값 표시. 같은 함수가 라이브 BLE/replay 양쪽을 처리.
+
+**참조**: `src/linkband/parser.ts`, `tests/parser.test.ts` (15 cases pass), reference-py/linkband/parser.py.
+
+---
+
 ### 2026-05-01 (저녁) — parser.test.ts 13 cases (RED) [PROGRESS]
 
 **무엇을**: `tests/parser.test.ts` (200+줄) 작성. Python reference (`reference-py/tests/test_parser.py`, 15/15 GREEN at commit be16261) 의 13 의미 케이스를 그대로 포팅.
