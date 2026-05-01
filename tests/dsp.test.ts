@@ -9,8 +9,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   type BiquadCoefs,
+  EEG_BANDS,
   EEG_SAMPLE_RATE,
   EEG_TRANSIENT_SAMPLES,
+  computeBandPower,
+  computeSpectrum,
   createBiquadState,
   createEegChannelFilter,
   highpassCoefs,
@@ -94,6 +97,53 @@ describe("lowpass (45Hz, Butterworth)", () => {
     const coefs = lowpassCoefs(FS, 45, 1 / Math.SQRT2);
     const filtered = applyFilter(coefs, generateSine(200, 2000, 100));
     expect(maxAbs(filtered.slice(500))).toBeLessThan(15);
+  });
+});
+
+describe("computeSpectrum (DFT)", () => {
+  it("10Hz sine 입력 → spectrum peak 가 10Hz 근처", () => {
+    const raw = generateSine(10, 1500, 50);
+    const spec = computeSpectrum(raw, FS, 1, 45);
+    expect(spec.length).toBe(45);
+    let peak = spec[0];
+    for (const p of spec) if (p[1] > peak[1]) peak = p;
+    expect(peak[0]).toBeGreaterThanOrEqual(9);
+    expect(peak[0]).toBeLessThanOrEqual(11);
+  });
+
+  it("입력 < MIN_SAMPLES (64) 이면 빈 배열", () => {
+    const tiny = generateSine(10, 32, 50);
+    expect(computeSpectrum(tiny, FS, 1, 45)).toEqual([]);
+  });
+});
+
+describe("computeBandPower (Morlet on linkband-style filter)", () => {
+  it("10Hz sine → alpha (8-13Hz) > delta (1-4Hz) by clear margin", () => {
+    // BAND_POWER_MIN_RAW = 600 (1.2s @ 500Hz), 충분히 길게 1500.
+    const raw = generateSine(10, 1500, 50);
+    const alpha = computeBandPower(raw, FS, 8, 13);
+    const delta = computeBandPower(raw, FS, 1, 4);
+    expect(alpha.db).toBeGreaterThan(delta.db);
+    expect(alpha.db - delta.db).toBeGreaterThan(10); // 적어도 10dB 차이
+  });
+
+  it("입력 < BAND_POWER_MIN_RAW 면 zero 반환", () => {
+    const tiny = generateSine(10, 100, 50);
+    expect(computeBandPower(tiny, FS, 8, 13)).toEqual({ linear: 0, db: 0 });
+  });
+});
+
+describe("EEG_BANDS", () => {
+  it("Delta/Theta/Alpha/Beta/Gamma 5 band 정의 (sensor-dashboard 동일)", () => {
+    expect(EEG_BANDS.map((b) => b.key)).toEqual([
+      "delta",
+      "theta",
+      "alpha",
+      "beta",
+      "gamma",
+    ]);
+    expect(EEG_BANDS[2]).toEqual({ key: "alpha", fMin: 8, fMax: 13 });
+    expect(EEG_BANDS[4].fMax).toBe(45); // gamma capped at 45 (not 50)
   });
 });
 

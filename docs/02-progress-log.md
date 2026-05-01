@@ -49,6 +49,46 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-02 (밤) — DSP 2/4: spectrum + band power [PROGRESS]
+
+**무엇을**: `src/linkband/dsp.ts` 에 sensor-dashboard `spectrum.ts` 의 spectrum + band power 부분 추가. 외부 FFT 라이브러리 없음 (자체 DFT + Morlet wavelet).
+
+**Exports**:
+- `EEG_BANDS` — 5 band 정의 (Delta 1-4, Theta 4-8, Alpha 8-13, Beta 13-30, Gamma 30-45). sdk.linkband UI 와 동일 (gamma 45Hz 캡, 50 아님).
+- `computeSpectrum(rawData, sampleRate, kMin=1, kMax=45)` — DC 제거 후 마지막 `DFT_WINDOW` 샘플로 freq 별 DFT power (dB). `[freq, dB]` 페어 배열 반환.
+- `computeBandPower(rawEeg, sampleRate, fMin, fMax)` — linkband-style filter (notch + bandpass) → Morlet wavelet → 평균 dB.
+- `computeEegPower(fp1Raw, fp2Raw, sampleRate)` — 양 채널 × 5 band 통합 결과.
+- 타입: `BandRange`, `BandPowerLinearDb`, `ComputedEegPower`.
+
+**fs 스케일링** (sensor-dashboard 250 → EEG_FS=500):
+- `BAND_SR = EEG_FS` = 500
+- `BAND_FILTER_TRANSIENT = EEG_FS` = 500 (1초, sensor-dashboard 의 250 = 1s @ 250Hz)
+- `DFT_WINDOW = EEG_FS` = 500 (1초, sensor-dashboard 256 ≈ 1.024s @ 250Hz 와 등가)
+- `BAND_POWER_MIN_RAW = 2 × EEG_FS / 5` = 600 (1.2s, sensor-dashboard 300 = 1.2s @ 250Hz)
+- `BAND_POWER_WINDOW_RAW = 2 × EEG_FS` = 1000 (2초, sensor-dashboard 500 = 2s @ 250Hz)
+- `MIN_SAMPLES = 64` 그대로 (DFT 최소 입력, frequency-only 임계값)
+
+**linkband-style 계수**:
+- `BP_NOTCH_COEFS = notchCoefs(500, 60, calcLinkbandNotchQ(60, 2))` — Q ≈ 20.01 (좁은 notch)
+- `BP_BANDPASS_COEFS = bandpassCoefs(500, 23, calcLinkbandBandpassQ(1, 45))` — Q ≈ 1.524
+
+**테스트** (`tests/dsp.test.ts` +5 cases, 총 16 cases):
+- `computeSpectrum`: 10Hz sine → spectrum peak 가 9-11Hz 사이
+- `computeSpectrum`: 입력 < 64 샘플 → 빈 배열
+- `computeBandPower`: 10Hz sine → alpha > delta by ≥10dB
+- `computeBandPower`: 입력 < 600 샘플 → `{linear:0, db:0}`
+- `EEG_BANDS`: 5 band key/range 정합
+
+**가드레일**: 새 폴더 0, 새 dependency 0. parser/models/main/layout/views 수정 0.
+
+**검증**: `tsc --noEmit` 통과. `npm run test:run` 32/32 GREEN (27 + 5).
+
+**다음**: SQI + EEG indices (focus/relaxation/stress 등) — step 3.
+
+**참조**: `src/linkband/dsp.ts`, sensor-dashboard `spectrum.ts`.
+
+---
+
 ### 2026-05-02 (밤) — DSP 1/4: biquad + EEG filter cascade [PROGRESS]
 
 **무엇을**: `src/linkband/dsp.ts` 신규 (단일 파일에 DSP 통합 — 다음 commits 도 같은 파일 확장). sensor-dashboard `src/lib/dsp/biquad.ts` + `eegPipeline.ts` 의 필터 부분 포팅.
