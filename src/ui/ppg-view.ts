@@ -23,9 +23,12 @@ import {
   type PpgChannelFilter,
   calculatePpgSqi,
   computeHeartRate,
+  computeHeartRateValidated,
   computeHrvMetrics,
+  computePpgStressIndex,
   createPpgChannelFilter,
   detectPpgPeaks,
+  detectPpgPeaksForHrv,
   peaksToRrSeconds,
   processPpgSample,
 } from "../linkband/dsp";
@@ -322,10 +325,12 @@ export function createPpgView(container: HTMLElement): PpgViewHandle {
   const filterIr: PpgChannelFilter = createPpgChannelFilter();
   const filterRed: PpgChannelFilter = createPpgChannelFilter();
 
-  const irBuf: number[] = []; // filtered IR
-  const redBuf: number[] = []; // filtered Red
+  const irBuf: number[] = []; // filtered IR (BPM 검출 + chart + SQI 입력)
+  const redBuf: number[] = []; // filtered Red (chart 입력)
+  const rawIrBuf: number[] = []; // raw IR (HRV 검출 — LF/HF 0.04-0.4Hz 보존, bandpass 가
+                                  // 1Hz 이하 차단해버리므로 raw 가 필요).
   const sqiBuf: number[] = []; // PPG SQI %
-  const bpmHistoryBuf: number[] = []; // BPM trend (one entry per batch)
+  const bpmHistoryBuf: number[] = []; // BPM trend (one entry per valid batch)
 
   function pushAndTrim<T>(buf: T[], v: T, max: number): void {
     buf.push(v);
@@ -334,7 +339,8 @@ export function createPpgView(container: HTMLElement): PpgViewHandle {
 
   return {
     onBatch(batch: PpgBatch): void {
-      // 샘플별 filter cascade 적용 — filtered IR/Red 만 buffer 에 push.
+      // 샘플별 filter cascade 적용. filtered IR/Red 는 chart/SQI/BPM 용,
+      // raw IR 는 HRV LF/HF 보존용 (별도 raw buffer).
       const filteredIr: number[] = new Array(batch.ir.length);
       const filteredRed: number[] = new Array(batch.red.length);
       for (let i = 0; i < batch.ir.length; i++) {
@@ -344,6 +350,7 @@ export function createPpgView(container: HTMLElement): PpgViewHandle {
         filteredRed[i] = fr;
         pushAndTrim(irBuf, fi, PPG_BUFFER_SIZE);
         pushAndTrim(redBuf, fr, PPG_BUFFER_SIZE);
+        pushAndTrim(rawIrBuf, batch.ir[i], PPG_BUFFER_SIZE);
       }
 
       const fs = batch.fs;
@@ -369,27 +376,39 @@ export function createPpgView(container: HTMLElement): PpgViewHandle {
         series: [{ data: sqiData }],
       });
 
-      // Peak detection on filtered IR → RR seconds → HRV/HR.
-      const peaks = detectPpgPeaks(irBuf, fs);
-      const rrSeconds = peaksToRrSeconds(peaks, fs);
-      const rrMs = rrSeconds.map((s) => s * 1000);
+      // BPM 경로 (filtered IR + adaptive peak + IQR/weighted/gate validation).
+      // 배포본 PPGSignalProcessor.ts 와 동일한 두-경로 구조:
+      //   1. BPM/HR Max/HR Min: filtered → adaptive peak → validated avg.
+      //   2. HRV: raw IR → simpler peak (max·0.5) → 표준 NN/RR 통계.
+      // 두 경로를 분리하는 이유: bandpass(1-5Hz) 는 LF/HF (0.04-0.4Hz) RR 변동
+      // 대역을 차단하므로, HRV 는 raw IR 기준이어야 함.
+      const filteredPeaks = detectPpgPeaks(irBuf, fs);
+      const filteredRrMs = peaksToRrSeconds(filteredPeaks, fs).map((s) => s * 1000);
+      const validatedBpm = computeHeartRateValidated(filteredRrMs);
+      const hr = computeHeartRate(filteredRrMs);
 
-      // 활성 9 metric cards 갱신 — RR ≥ 1 일 때 의미 있는 값.
-      if (rrMs.length >= 1) {
-        const hr = computeHeartRate(rrMs);
-        const hrv = computeHrvMetrics(rrMs);
-        m.bpm.update(hr.bpm);
-        m.hrMax.update(hr.hrMax);
-        m.hrMin.update(hr.hrMin);
+      m.bpm.update(validatedBpm); // 0 → requirePositive=true 라 "No data" 표시.
+      m.hrMax.update(hr.hrMax);
+      m.hrMin.update(hr.hrMin);
+
+      // HRV 경로 — raw IR 기준 (LF/HF 보존).
+      const hrvPeaks = detectPpgPeaksForHrv(rawIrBuf, fs);
+      const hrvRrMs = peaksToRrSeconds(hrvPeaks, fs).map((s) => s * 1000);
+      if (hrvRrMs.length >= 2) {
+        const hrv = computeHrvMetrics(hrvRrMs);
         m.avnn.update(hrv.avnn);
         m.sdnn.update(hrv.sdnn);
         m.rmssd.update(hrv.rmssd);
         m.sdsd.update(hrv.sdsd);
         m.pnn50.update(hrv.pnn50);
         m.pnn20.update(hrv.pnn20);
+        // PPG Stress Index — RR ≥ 5 일 때 의미 있는 0..1 정규화 값.
+        m.ppgStressIndex.update(computePpgStressIndex(hrvRrMs));
+      }
 
-        // BPM trend buffer — 1 entry per batch.
-        pushAndTrim(bpmHistoryBuf, hr.bpm, BPM_HISTORY_SIZE);
+      // BPM trend chart — validated BPM 가 0 이면 skip (잡음 시 trend 흔들림 방지).
+      if (validatedBpm > 0) {
+        pushAndTrim(bpmHistoryBuf, validatedBpm, BPM_HISTORY_SIZE);
         const bpmLast = Math.max(bpmHistoryBuf.length - 1, 0);
         // 1 entry per ~0.56s — 시간축은 -BPM_WINDOW_SEC..0.
         const bpmData: Array<[number, number]> = bpmHistoryBuf.map((v, i) => {

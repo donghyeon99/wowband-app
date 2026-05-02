@@ -15,6 +15,8 @@ import {
   PPG_SAMPLE_RATE,
   PPG_TRANSIENT_SAMPLES,
   calculateEegSqi,
+  computeAccAnalysis,
+  computePpgStressIndex,
   computeHeartRate,
   computeHeartRateValidated,
   computeHrvMetrics,
@@ -462,6 +464,51 @@ describe("computeHeartRateValidated (배포본 IQR + 가중평균 + 검증)", ()
   });
 });
 
+describe("computePpgStressIndex (배포본 0.4·SDNN + 0.4·RMSSD + 0.2·HR 가중)", () => {
+  it("RR < 5 → 0 (의미 있는 산출 불가)", () => {
+    expect(computePpgStressIndex([800, 800, 800, 800])).toBe(0);
+  });
+
+  it("매우 안정적인 RR (SDNN/RMSSD ≈ 0, mean=1000ms = 60bpm) → ~0.71 = high stress", () => {
+    // 균일 1000ms RR → SDNN=0, RMSSD=0. avgBpm=60.
+    //   normalizedSDNN = (100-0)/70 → clamp 1.0
+    //   normalizedRMSSD = (50-0)/30 → clamp 1.0
+    //   hrStress = (60-60)/40 = 0
+    //   stress = 0.4 + 0.4 + 0 = 0.8.
+    // 즉 너무 안정적인 (rigid) 심박은 자율신경 부족 = 스트레스 신호로 해석.
+    const v = computePpgStressIndex([1000, 1000, 1000, 1000, 1000]);
+    expect(v).toBeCloseTo(0.8, 2);
+  });
+
+  it("정상적 변동성 (SDNN ≈ 50, RMSSD ≈ 50, BPM ≈ 75) → 중간값", () => {
+    // RR alternating 750/850 → mean=800 (75bpm), SDNN=50, diffs=±100 → RMSSD=100.
+    //   normalizedSDNN = (100-50)/70 ≈ 0.714
+    //   normalizedRMSSD = (50-100)/30 → clamp 0  (RMSSD 100 > 50 정상상한)
+    //   hrStress = (75-60)/40 = 0.375
+    //   stress = 0.4·0.714 + 0.4·0 + 0.2·0.375 = 0.286 + 0.075 = 0.361.
+    const v = computePpgStressIndex([750, 850, 750, 850, 750, 850]);
+    expect(v).toBeCloseTo(0.361, 2);
+  });
+
+  it("매우 빠른 HR (mean=400ms = 150bpm) → hrStress saturate to 1, stress > 0.7", () => {
+    // 균일 400ms RR → SDNN=0, RMSSD=0, avgBpm=150.
+    //   normalizedSDNN = 1, normalizedRMSSD = 1, hrStress = (150-60)/40 → clamp 1.
+    //   stress = 0.4+0.4+0.2 = 1.0 (max).
+    const v = computePpgStressIndex([400, 400, 400, 400, 400]);
+    expect(v).toBeCloseTo(1.0, 2);
+  });
+
+  it("결과는 항상 [0, 1] 범위", () => {
+    // 어떤 input 이든 clamp 가 보장.
+    const v1 = computePpgStressIndex([100, 200, 300, 400, 500]);
+    expect(v1).toBeGreaterThanOrEqual(0);
+    expect(v1).toBeLessThanOrEqual(1);
+    const v2 = computePpgStressIndex([2000, 2000, 2000, 2000, 2000]);
+    expect(v2).toBeGreaterThanOrEqual(0);
+    expect(v2).toBeLessThanOrEqual(1);
+  });
+});
+
 describe("detectPpgPeaksForHrv (배포본 detectPeaksForHRV 동일)", () => {
   function ppgWaveform(fs: number, peaksAtSamples: number[], len: number, baseline = 1000): number[] {
     const sig = new Array(len).fill(baseline);
@@ -504,6 +551,55 @@ describe("detectPpgPeaksForHrv (배포본 detectPeaksForHRV 동일)", () => {
 
   it("길이 < 3 → 빈 배열", () => {
     expect(detectPpgPeaksForHrv([1, 2], 50)).toEqual([]);
+  });
+});
+
+describe("computeAccAnalysis (approximate baseline — refine later)", () => {
+  const ACC_FS = 25;
+
+  it("정지 상태 (모든 magnitude = 1g) → intensity ≈ 0, stability ≈ 100, activityState='stationary'", () => {
+    // 30 samples = ~1.2s @ 25Hz. mag = 1 + tiny noise (1e-4) — std 무시 수준.
+    const mag: number[] = [];
+    for (let i = 0; i < 30; i++) mag.push(1 + (i % 2 === 0 ? 1e-5 : -1e-5));
+    const a = computeAccAnalysis(mag, ACC_FS);
+    expect(a.intensity).toBeLessThan(1);
+    expect(a.stability).toBeGreaterThan(99);
+    expect(a.activityState).toBe("stationary");
+    expect(a.avgMovement).toBeLessThan(1e-3);
+  });
+
+  it("큰 움직임 (mag oscillates 0.0 ↔ 2.0g) → intensity > 50, activityState='moving'", () => {
+    // 평균 편차 |mag - 1| = 1.0 → intensity = 100 (saturated). 큰 σ → stability 낮음.
+    const mag: number[] = [];
+    for (let i = 0; i < 50; i++) mag.push(i % 2 === 0 ? 0.0 : 2.0);
+    const a = computeAccAnalysis(mag, ACC_FS);
+    expect(a.intensity).toBeGreaterThan(50);
+    expect(a.activityState).toBe("moving");
+    expect(a.avgMovement).toBeCloseTo(1.0, 5);
+  });
+
+  it("activityState transitions at intensity ≈ 25 (boundary = avgMovement 0.25g)", () => {
+    // avgMovement = 0.24 → intensity = 24 → 'stationary'
+    const below: number[] = [];
+    for (let i = 0; i < 30; i++) below.push(i % 2 === 0 ? 0.76 : 1.24);
+    const aBelow = computeAccAnalysis(below, ACC_FS);
+    expect(aBelow.intensity).toBeCloseTo(24, 5);
+    expect(aBelow.activityState).toBe("stationary");
+
+    // avgMovement = 0.26 → intensity = 26 → 'moving'
+    const above: number[] = [];
+    for (let i = 0; i < 30; i++) above.push(i % 2 === 0 ? 0.74 : 1.26);
+    const aAbove = computeAccAnalysis(above, ACC_FS);
+    expect(aAbove.intensity).toBeCloseTo(26, 5);
+    expect(aAbove.activityState).toBe("moving");
+  });
+
+  it("빈 buffer → defaults (stationary, 0 intensity, 100 stability, 0 avgMovement)", () => {
+    const a = computeAccAnalysis([], ACC_FS);
+    expect(a.activityState).toBe("stationary");
+    expect(a.intensity).toBe(0);
+    expect(a.stability).toBe(100);
+    expect(a.avgMovement).toBe(0);
   });
 });
 

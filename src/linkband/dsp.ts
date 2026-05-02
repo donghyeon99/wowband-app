@@ -742,6 +742,129 @@ export function computeHeartRateValidated(rrIntervalsMs: number[]): number {
   return Math.round(bpm);
 }
 
+// ─── PPG Stress Index (HRV-based normalized 0..1) ────────────────────────
+//
+// 배포본 `sdk_PPGSignalProcessor.ts:1388-1424` 의 `computeStressIndex` 정확 동일.
+// SDNN / RMSSD / 평균 HR 세 정규화의 가중 합 (0.4 / 0.4 / 0.2):
+//   - SDNN low → 스트레스 ↑ (정상 30-100ms, normalize 100-sdnn / 70 → 0..1)
+//   - RMSSD low → 스트레스 ↑ (정상 20-50ms, normalize 50-rmssd / 30 → 0..1)
+//   - HR high → 스트레스 ↑ (정상 60-100bpm, normalize bpm-60 / 40 → 0..1)
+// 결과는 [0, 1] clamp. 0.30..0.70 = "normal" (ppgIndexThresholds.ppgStressIndex 첫 normal level).
+// RR 5개 미만이면 의미 있는 값 산출 불가 → 0 반환.
+
+/** RR ms 배열 → 0..1 정규화된 PPG stress index. RR < 5 면 0. */
+export function computePpgStressIndex(rrIntervalsMs: number[]): number {
+  if (rrIntervalsMs.length < 5) return 0;
+
+  // SDNN — population std (배포본과 동일 N divisor).
+  const mean = rrIntervalsMs.reduce((s, v) => s + v, 0) / rrIntervalsMs.length;
+  const varRR =
+    rrIntervalsMs.reduce((s, v) => s + (v - mean) ** 2, 0) / rrIntervalsMs.length;
+  const sdnn = Math.sqrt(varRR);
+
+  // RMSSD — successive differences std.
+  let sqDiffSum = 0;
+  for (let i = 1; i < rrIntervalsMs.length; i++) {
+    const d = rrIntervalsMs[i] - rrIntervalsMs[i - 1];
+    sqDiffSum += d * d;
+  }
+  const rmssd = Math.sqrt(sqDiffSum / (rrIntervalsMs.length - 1));
+
+  // 정규화 — 낮은 HRV / 빠른 HR → 높은 스트레스.
+  const normalizedSdnn = Math.max(0, Math.min(1, (100 - sdnn) / 70));
+  const normalizedRmssd = Math.max(0, Math.min(1, (50 - rmssd) / 30));
+  const avgBpm = 60000 / mean;
+  const hrStress = Math.max(0, Math.min(1, (avgBpm - 60) / 40));
+
+  // 가중 합 — SDNN/RMSSD 각 0.4, HR 0.2.
+  const stressIndex = normalizedSdnn * 0.4 + normalizedRmssd * 0.4 + hrStress * 0.2;
+  return Math.max(0, Math.min(1, stressIndex));
+}
+
+// ─── ACC analysis (movement intensity / postural stability) ──────────────
+//
+// **Note**: sensor-dashboard 는 ACC analysis 를 SSE backend 로부터 받아 store
+// 에 저장 (`accAdapter.normalizeAccAnalysis`) — TS 측에 자체 산식 없음. linkband
+// SDK Python core 도 ACC analysis 를 내장하지 않음 (raw stream 만). 따라서 이
+// 산식은 **approximate baseline (refine later)** — `accIndexThresholds.intensity`
+// boundary (25 = sedentary→light) 와 `accIndexThresholds.stability` 의 70%
+// "Stable" 임계값에 맞춰 normalize. magnitude 는 g 단위 (정지 시 ≈ 1g).
+//
+//   avgMovement   = mean(|magnitude − 1|)        — 1g rest baseline 으로부터 편차
+//   intensity     = 100 × clamp(avgMovement / 1.0g, 0, 1)        — 0..100%
+//   stability     = 100 × (1 − clamp(σ_mag / 0.5g, 0, 1))        — high σ → low stability
+//   activityState = intensity < 25 ? 'stationary' : 'moving'     — threshold first level
+//
+// σ_max = 0.5g 는 normal walking 에서 magnitude 표준편차 ~0.3-0.5g (보고된 wearable
+// IMU literature 값) 기반 — 실 디바이스 검증 후 조정 가능. avgMovement 1g 도
+// 동일 — 격렬한 운동 시 |mag - 1g| 평균 ~1g 도달.
+
+export type ActivityState = "stationary" | "moving";
+
+export interface AccAnalysis {
+  /** 'stationary' (intensity < 25) 또는 'moving'. */
+  activityState: ActivityState;
+  /** 0..100% — 큰 움직임 정도. */
+  intensity: number;
+  /** 0..100% — 자세 안정성 (낮은 magnitude variance 일수록 높음). */
+  stability: number;
+  /** mean(|magnitude − 1|) — g 단위. 1g rest baseline 편차. */
+  avgMovement: number;
+}
+
+/** approximate normalization 상수 — 실 디바이스 검증 후 조정 (위 노트 참조). */
+const ACC_INTENSITY_REF_G = 1.0;
+const ACC_STABILITY_SIGMA_MAX_G = 0.5;
+const ACC_INTENSITY_STATIONARY_THRESHOLD = 25; // accIndexThresholds.intensity 첫 boundary
+
+function clamp01(v: number): number {
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
+}
+
+/**
+ * ACC magnitude buffer (g 단위) → 4-tuple analysis.
+ *
+ * 빈 buffer / fs ≤ 0 이면 0 / 'stationary'. View layer 가 raw int16 → g 변환
+ * 후 magnitude = √(x²+y²+z²) 를 누적해 전달.
+ *
+ * `_fs` 는 API 호환용 — 본 산식은 sample rate 무관 (mean/std 만 사용).
+ */
+export function computeAccAnalysis(
+  magnitudeBuf: number[],
+  _fs: number,
+): AccAnalysis {
+  const n = magnitudeBuf.length;
+  if (n === 0) {
+    return { activityState: "stationary", intensity: 0, stability: 100, avgMovement: 0 };
+  }
+
+  // mean(|mag - 1|) — 1g rest baseline 편차.
+  let absDevSum = 0;
+  let magSum = 0;
+  for (let i = 0; i < n; i++) {
+    absDevSum += Math.abs(magnitudeBuf[i] - 1);
+    magSum += magnitudeBuf[i];
+  }
+  const avgMovement = absDevSum / n;
+  const meanMag = magSum / n;
+
+  // σ_magnitude — population std (divide by N, sensor-dashboard 와 동일 패턴).
+  let varSum = 0;
+  for (let i = 0; i < n; i++) {
+    varSum += (magnitudeBuf[i] - meanMag) ** 2;
+  }
+  const sigma = Math.sqrt(varSum / n);
+
+  const intensity = 100 * clamp01(avgMovement / ACC_INTENSITY_REF_G);
+  const stability = 100 * (1 - clamp01(sigma / ACC_STABILITY_SIGMA_MAX_G));
+  const activityState: ActivityState =
+    intensity < ACC_INTENSITY_STATIONARY_THRESHOLD ? "stationary" : "moving";
+
+  return { activityState, intensity, stability, avgMovement };
+}
+
 /** RR ms 배열 → 평균/최대/최소 BPM. 빈 배열이면 모두 0. */
 export function computeHeartRate(rrIntervalsMs: number[]): HeartRate {
   if (rrIntervalsMs.length === 0) return { bpm: 0, hrMax: 0, hrMin: 0 };

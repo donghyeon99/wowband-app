@@ -1,30 +1,43 @@
 /**
- * ACC view — sensor-dashboard `ACCVisualizer.tsx` 의 4-row 레이아웃 미러링.
+ * ACC view — sensor-dashboard `ACCVisualizer.tsx` + `MotionCards.tsx` 의 4-row 레이아웃 미러링.
  *
  * 구조 (sensor-dashboard 동일):
  *   1. Hero card        — "📐 ACC Acceleration Analysis" + 설명 + 3 InfoBadge
  *   2. Full-width       — "3-Axis Acceleration Waveform" (X/Y/Z multi-line)
  *   3. Full-width       — "Magnitude" (√(x²+y²+z²) per-sample, area chart)
- *   4. Full-width       — "📐 Movement Analysis" placeholder
+ *   4. Full-width       — "📐 Movement Analysis" cards
+ *                         - Row A (4-col): X / Y / Z / Magnitude raw value cards
+ *                         - Row B (3-col): Activity State / Stability / Intensity
  *
  * Magnitude 는 DSP 가 아닌 단순 산술 (3D 벡터 norm) — view 안에서 계산.
+ * Stability / Intensity / activityState 는 `computeAccAnalysis` (dsp.ts) — 본
+ * 산식은 approximate baseline (sensor-dashboard 가 server-side 라 client formula
+ * 부재 → linkband-app 자체 정의, 실 디바이스 검증 후 조정).
  *
  * 외부 인터페이스:
  *     const view = createAccView(container)
  *     view.onBatch(accBatch)
  *     view.dispose()
  */
+import { computeAccAnalysis } from "../linkband/dsp";
 import { ACC_FS, ACC_LSB_PER_G, type AccBatch } from "../linkband/models";
+import { accIndexThresholds } from "../linkband/thresholds";
 import {
   type ChartHandle,
   buildMultiLineOption,
   buildRealtimeLineOption,
   createChart,
 } from "./chart";
+import { createIndexCard, type IndexCardHandle } from "./index-card";
 import { chartColors, rgba, uiColors } from "./theme";
 
 const ACC_BUFFER_SIZE = 200; // ~8s @ 25Hz
 const ACC_WINDOW_SEC = ACC_BUFFER_SIZE / ACC_FS; // = 8 — xAxis 고정 윈도우
+const STYLE_ID = "acc-view-style";
+
+// Activity State dot colors — sensor-dashboard `MotionCards.tsx` 의 teal/coral.
+const ACTIVITY_STATIONARY_COLOR = "#14b8a6"; // teal-500
+const ACTIVITY_MOVING_COLOR = "#f87171"; // coral / red-400
 
 export interface AccViewHandle {
   onBatch(batch: AccBatch): void;
@@ -32,6 +45,33 @@ export interface AccViewHandle {
    *  measure 된 걸 정상 사이즈로 다시 잡아준다. */
   resize(): void;
   dispose(): void;
+}
+
+// ─── Style injection ──────────────────────────────────────────────────────
+function ensureStyles(): void {
+  if (document.getElementById(STYLE_ID)) return;
+  const s = document.createElement("style");
+  s.id = STYLE_ID;
+  s.textContent = `
+    .acc-cards-grid-4 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.6rem;
+      margin-bottom: 0.6rem;
+    }
+    @media (min-width: 768px) {
+      .acc-cards-grid-4 { grid-template-columns: repeat(4, 1fr); }
+    }
+    .acc-cards-grid-3 {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.6rem;
+    }
+    @media (min-width: 768px) {
+      .acc-cards-grid-3 { grid-template-columns: repeat(3, 1fr); }
+    }
+  `;
+  document.head.appendChild(s);
 }
 
 // ─── DOM helpers (eeg/ppg-view.ts 와 동일 패턴) ───────────────────────────
@@ -66,26 +106,6 @@ function makeCardDesc(html: string): HTMLElement {
   return p;
 }
 
-function makePlaceholder(label: string, height: string): HTMLElement {
-  const ph = document.createElement("div");
-  ph.style.cssText = `
-    width: 100%;
-    height: ${height};
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: ${uiColors.bgBase};
-    border: 1px dashed ${uiColors.border};
-    border-radius: 6px;
-    color: ${uiColors.textMuted};
-    font-size: 0.85rem;
-    text-align: center;
-    padding: 0 1rem;
-  `;
-  ph.textContent = `${label} — DSP not yet implemented`;
-  return ph;
-}
-
 /**
  * sensor-dashboard `components/ui/InfoBadge.tsx` 의 단순 미러 — 색 컬러키 + 텍스트.
  * shadcn Badge 의존성 없이 inline span + style. accent color 는 yellow 고정.
@@ -107,9 +127,151 @@ function makeInfoBadge(text: string): HTMLElement {
   return badge;
 }
 
+// ─── Raw value card (no threshold, no tooltip) ─────────────────────────────
+//
+// X/Y/Z/Magnitude 는 단순 raw 값 표시 — sensor-dashboard `MotionCards.tsx` 의
+// 첫 번째 4개 카드. metric-card.ts 는 status 라벨 강제 ("live" / "No data") 라
+// 시각이 살짝 다름 → 이 view 전용 mini-card 로.
+
+interface RawValueCardHandle {
+  readonly element: HTMLElement;
+  update(value: number): void;
+}
+
+function createRawValueCard(
+  container: HTMLElement,
+  label: string,
+  dotColor: string,
+  unit: string,
+): RawValueCardHandle {
+  const card = document.createElement("div");
+  card.style.cssText = `
+    background: ${uiColors.bgElevated};
+    border: 1px solid ${uiColors.border};
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    min-width: 0;
+  `;
+
+  const head = document.createElement("div");
+  head.style.cssText = "display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem;";
+  const dot = document.createElement("span");
+  dot.style.cssText = `
+    width: 0.6rem; height: 0.6rem; border-radius: 50%;
+    background: ${dotColor};
+    flex-shrink: 0;
+  `;
+  head.appendChild(dot);
+  const labelEl = document.createElement("span");
+  labelEl.textContent = label;
+  labelEl.style.cssText = `font-size: 0.8rem; font-weight: 600; color: ${uiColors.textSecondary};`;
+  head.appendChild(labelEl);
+  card.appendChild(head);
+
+  const valueRow = document.createElement("div");
+  valueRow.style.cssText = `
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: ${uiColors.textPrimary};
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    line-height: 1.2;
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+  `;
+  const valueEl = document.createElement("span");
+  valueEl.textContent = "—";
+  valueRow.appendChild(valueEl);
+  const unitEl = document.createElement("span");
+  unitEl.textContent = unit;
+  unitEl.style.cssText = `font-size: 0.7rem; color: ${uiColors.textMuted}; font-weight: 400;`;
+  valueRow.appendChild(unitEl);
+  card.appendChild(valueRow);
+
+  container.appendChild(card);
+
+  return {
+    element: card,
+    update(value: number): void {
+      valueEl.textContent = value.toFixed(3);
+    },
+  };
+}
+
+// ─── Activity State card (text 표시, threshold 없음) ───────────────────────
+interface ActivityStateCardHandle {
+  readonly element: HTMLElement;
+  update(state: "stationary" | "moving"): void;
+}
+
+function createActivityStateCard(container: HTMLElement): ActivityStateCardHandle {
+  const card = document.createElement("div");
+  card.style.cssText = `
+    position: relative;
+    background: ${uiColors.bgElevated};
+    border: 1px solid ${uiColors.border};
+    border-radius: 8px;
+    padding: 1rem;
+    overflow: visible;
+  `;
+
+  const head = document.createElement("div");
+  head.style.cssText = "display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;";
+  const dot = document.createElement("span");
+  dot.style.cssText = `
+    width: 0.75rem; height: 0.75rem; border-radius: 50%;
+    background: ${ACTIVITY_STATIONARY_COLOR};
+    flex-shrink: 0;
+  `;
+  head.appendChild(dot);
+  const labelEl = document.createElement("span");
+  labelEl.textContent = "Activity State";
+  labelEl.style.cssText = `font-size: 0.85rem; font-weight: 600; color: ${uiColors.textPrimary};`;
+  head.appendChild(labelEl);
+  card.appendChild(head);
+
+  const valueEl = document.createElement("div");
+  valueEl.textContent = "—";
+  valueEl.style.cssText = `
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: ${uiColors.textPrimary};
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    line-height: 1.2;
+    margin-bottom: 0.25rem;
+  `;
+  card.appendChild(valueEl);
+
+  // index-card 와 시각 일관성을 위해 status 슬롯 비워둠 (placeholder).
+  const statusEl = document.createElement("div");
+  statusEl.textContent = "Awaiting data";
+  statusEl.style.cssText = `font-size: 0.7rem; font-weight: 500; color: ${uiColors.textMuted};`;
+  card.appendChild(statusEl);
+
+  container.appendChild(card);
+
+  return {
+    element: card,
+    update(state: "stationary" | "moving"): void {
+      valueEl.textContent = state;
+      if (state === "stationary") {
+        dot.style.background = ACTIVITY_STATIONARY_COLOR;
+        statusEl.textContent = "At rest";
+        statusEl.style.color = ACTIVITY_STATIONARY_COLOR;
+      } else {
+        dot.style.background = ACTIVITY_MOVING_COLOR;
+        statusEl.textContent = "In motion";
+        statusEl.style.color = ACTIVITY_MOVING_COLOR;
+      }
+    },
+  };
+}
+
 // ─── createAccView ────────────────────────────────────────────────────────
 
 export function createAccView(container: HTMLElement): AccViewHandle {
+  ensureStyles();
+
   const root = document.createElement("section");
   root.className = "acc-view-root";
 
@@ -160,7 +322,7 @@ export function createAccView(container: HTMLElement): AccViewHandle {
   magCard.appendChild(magHost);
   root.appendChild(magCard);
 
-  // (4) Movement Analysis placeholder.
+  // (4) Movement Analysis cards (sensor-dashboard `MotionCards.tsx` 미러).
   const motionCard = makeCard();
   motionCard.appendChild(makeCardTitle("📐 Movement Analysis"));
   motionCard.appendChild(
@@ -168,9 +330,31 @@ export function createAccView(container: HTMLElement): AccViewHandle {
       "Real-time acceleration summary and activity state (stationary/moving) analysis.",
     ),
   );
-  motionCard.appendChild(makePlaceholder("Movement Analysis cards", "180px"));
-  root.appendChild(motionCard);
 
+  // Row A — 4-col raw value cards (X / Y / Z / Magnitude).
+  const rawGrid = document.createElement("div");
+  rawGrid.className = "acc-cards-grid-4";
+  motionCard.appendChild(rawGrid);
+  const xCard = createRawValueCard(rawGrid, "X-axis", chartColors.accX, "g");
+  const yCard = createRawValueCard(rawGrid, "Y-axis", chartColors.accY, "g");
+  const zCard = createRawValueCard(rawGrid, "Z-axis", chartColors.accZ, "g");
+  const magValueCard = createRawValueCard(rawGrid, "Magnitude", chartColors.magnitude, "g");
+
+  // Row B — 3-col analysis (Activity State / Stability / Intensity).
+  const analysisGrid = document.createElement("div");
+  analysisGrid.className = "acc-cards-grid-3";
+  motionCard.appendChild(analysisGrid);
+  const activityCard = createActivityStateCard(analysisGrid);
+  const stabilityCard: IndexCardHandle = createIndexCard(analysisGrid, {
+    threshold: accIndexThresholds.stability,
+    decimals: 0,
+  });
+  const intensityCard: IndexCardHandle = createIndexCard(analysisGrid, {
+    threshold: accIndexThresholds.intensity,
+    decimals: 0,
+  });
+
+  root.appendChild(motionCard);
   container.appendChild(root);
 
   // ─── Charts ──────────────────────────────────────────────────────────────
@@ -264,6 +448,23 @@ export function createAccView(container: HTMLElement): AccViewHandle {
         xAxis: { min: -ACC_WINDOW_SEC, max: 0 },
         series: [{ data: magData }],
       });
+
+      // ─── Movement Analysis cards 갱신 ─────────────────────────────────────
+      // 매 batch 갱신 — magBuf 가 작고(200 samples) computeAccAnalysis 가 가벼움
+      // (mean + std O(N)). raw value 카드는 latest 1 sample.
+      const xLastVal = xBuf[xBuf.length - 1] ?? 0;
+      const yLastVal = yBuf[yBuf.length - 1] ?? 0;
+      const zLastVal = zBuf[zBuf.length - 1] ?? 0;
+      const magLastVal = magBuf[magBuf.length - 1] ?? 0;
+      xCard.update(xLastVal);
+      yCard.update(yLastVal);
+      zCard.update(zLastVal);
+      magValueCard.update(magLastVal);
+
+      const analysis = computeAccAnalysis(magBuf, ACC_FS);
+      activityCard.update(analysis.activityState);
+      stabilityCard.update(analysis.stability);
+      intensityCard.update(analysis.intensity);
     },
     resize(): void {
       waveChart.chart.resize();

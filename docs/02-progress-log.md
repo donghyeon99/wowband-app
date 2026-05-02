@@ -49,6 +49,70 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-03 (낮) — A+B+C 묶음: PPG 두-경로 wiring / Stress Index 점등 / ACC MotionCards [PROGRESS]
+
+**무엇을**: 직전 entry 의 "다음 단계" 3건 (A: PPG view 가 `detectPpgPeaksForHrv` /
+`computeHeartRateValidated` 사용하도록 wire, B: PPG Stress Index DSP 추가
++ 카드 점등, C: ACC MotionCards 7-카드 분석 영역) 일괄 처리.
+
+#### A. PPG view: 두-경로 BPM/HRV wiring (`src/ui/ppg-view.ts`)
+배포본 `PPGSignalProcessor.ts` 와 동일한 분리:
+- **BPM 경로** (filtered IR + adaptive peak): `computeHeartRateValidated`
+  (IQR 1.5× outlier + linear-weighted + [40, 200] BPM gate + CV>0.5 → ×0.9
+  attenuate). m.bpm/hrMax/hrMin 갱신.
+- **HRV 경로** (raw IR + simpler peak `max·0.5`): `detectPpgPeaksForHrv`. RR 시계열은
+  bandpass 가 차단해버리는 LF/HF (0.04–0.4Hz) 변동을 보존. m.sdnn/rmssd/sdsd/avnn/pnn50/pnn20.
+- 신규 `rawIrBuf` (PPG_BUFFER_SIZE = 400 samples / 8s @ 50Hz).
+- BPM trend chart: `validatedBpm > 0` 일 때만 push (잡음 시 trend 흔들림 방지).
+
+#### B. PPG Stress Index DSP (`src/linkband/dsp.ts`, `tests/dsp.test.ts`)
+- 신규 `computePpgStressIndex(rrMs): number` (L745-) — 배포본
+  `sdk_PPGSignalProcessor.ts:1388-1424` 정확 동일. 0.4·SDNNnorm + 0.4·RMSSDnorm
+  + 0.2·HRstress, 결과 [0, 1] clamp. RR < 5 면 0.
+- 5 단위 테스트 추가: RR<5 가드, rigid (낮은 HRV) → ~0.8, 정상 변동 → ~0.36, 빠른
+  HR (150bpm) → ~1.0, [0,1] 범위 보장.
+- `ppg-view.ts` 의 HRV 경로에서 `m.ppgStressIndex.update(...)` 호출 — placeholder
+  5개 중 1개 활성화. 남은 4 개 (spo2/lfPower/hfPower/lfHfRatio) 는 차후.
+
+#### C. ACC MotionCards 7-카드 영역 (background agent 작업)
+- `src/linkband/dsp.ts`: 신규 `ActivityState` / `AccAnalysis` 타입 + `computeAccAnalysis`
+  (L795-). magnitude buffer (g 단위) → mean/std → activityState/intensity/stability/
+  avgMovement.
+  - **공식 출처**: sensor-dashboard 가 ACC analysis 를 SSE backend 결과로 받아
+    저장 (`accAdapter.normalizeAccAnalysis`) — TS 측 산식 부재. linkband Python
+    core 도 raw stream 만. 따라서 본 산식은 **approximate baseline**:
+    - `avgMovement = mean(|magnitude − 1|)`
+    - `intensity = 100 × clamp(avgMovement / 1.0g, 0, 1)`
+    - `stability = 100 × (1 − clamp(σ_mag / 0.5g, 0, 1))`
+    - `activityState = intensity < 25 ? 'stationary' : 'moving'`
+  - σ_max=0.5g, refG=1.0g 는 wearable IMU literature 보고치 — 실 디바이스 검증 후 조정.
+- `src/ui/acc-view.ts`: 기존 placeholder 카드 → 7-card grid:
+  - Row A (4-col): X / Y / Z / Magnitude raw value mini-card (3-decimal `g`).
+  - Row B (3-col): Activity State (teal/coral dot) / Stability / Intensity
+    (둘 다 `createIndexCard` rich + hover tooltip).
+- 4 단위 테스트 추가 (정지 → stability~100 / intensity~0, 큰 진동 → moving,
+  intensity≈25 boundary, 빈 buffer 디폴트).
+
+#### 검증
+- `tsc --noEmit` clean.
+- `npm run test:run` **67 → 76 GREEN** (+5 PPG stress, +4 ACC analysis).
+
+#### 다음 단계
+- 남은 placeholder 4: SpO₂ (Beer-Lambert), Welch periodogram (LF / HF / LF·HF ratio).
+  FFT 모듈 도입 필요 — 별도 청크.
+- ACC 산식 실 디바이스 검증 (현재 baseline) — magnitude std σ_max 와 avgMovement
+  ref 값 보정.
+- 성능: PPG view 가 매 batch (~0.56s) 에 두 peak detection (filtered + raw) 동시
+  실행. 현 buffer (400 samples) 에선 부담 없으나, 모니터링 유지.
+
+**참조**:
+- 신규 / 수정: `src/linkband/dsp.ts` (+computePpgStressIndex, +computeAccAnalysis),
+  `src/ui/ppg-view.ts` (raw IR buffer + 두-경로 + stress wire),
+  `src/ui/acc-view.ts` (7-card grid + ensureStyles),
+  `tests/dsp.test.ts` (+9 tests).
+
+---
+
 ### 2026-05-03 (오전) — PPG HRV Metrics rich card + hover tooltip [PROGRESS]
 
 **무엇을**: 사용자 요청 — `💓 Heart Rate Variability Metrics` 영역의 모든 카드도
