@@ -1,14 +1,17 @@
 /**
- * PPG view — sensor-dashboard `PPGVisualizer.tsx` 의 4-row 레이아웃 + DSP wired.
+ * PPG view — sensor-dashboard `PPGVisualizer.tsx` + `PPGMetricsCards.tsx` 의 레이아웃.
  *
  * 구조 (DSP active):
  *   1. Hero card        — "💓 PPG Pulse Analysis" + 설명
  *   2. 2-col Row        — Filtered PPG Signal | PPG SQI (실 차트)
  *   3. Full-width       — 💓 BPM Trend (실 차트, ~60s 윈도우)
- *   4. Full-width       — 💓 HRV Metrics (17 cards: 9 active, 8 placeholder)
+ *   4. Full-width       — 💓 HRV Metrics (14 cards 4-4-3-3 grid, hover tooltip)
+ *      활성 8: HR / HR Max / HR Min / SDNN / RMSSD / SDSD / AVNN / PNN50 / PNN20
+ *              (PNN20 포함 9개지만 deployed grid 그대로 두고 분류)
+ *      placeholder 6: SpO2 / Stress / LF / HF / LF/HF / (no DSP wire 아직)
  *
- * Filter chain: HP 0.5Hz → LP 5Hz @ 50Hz (sensor-dashboard `ppgPipeline.ts` 그대로).
- * Peak detection: own derivation (adaptive threshold + min interval). RR-base HRV.
+ * Filter chain: bandpass 1-5Hz @ 50Hz. Peak detection: local 0.5s adaptive +
+ * 5-pt shape. RR-base HRV.
  *
  * 외부 인터페이스:
  *     const view = createPpgView(container)
@@ -27,13 +30,14 @@ import {
   processPpgSample,
 } from "../linkband/dsp";
 import { PPG_FS, type PpgBatch } from "../linkband/models";
+import { ppgIndexThresholds } from "../linkband/thresholds";
 import {
   type ChartHandle,
   buildMultiLineOption,
   buildRealtimeLineOption,
   createChart,
 } from "./chart";
-import { createMetricCard, type MetricCardHandle } from "./metric-card";
+import { createIndexCard, type IndexCardHandle } from "./index-card";
 import { chartColors, uiColors } from "./theme";
 
 const PPG_BUFFER_SIZE = 400; // ~8s @ 50Hz
@@ -63,11 +67,25 @@ function ensureStyles(): void {
     @media (min-width: 1024px) {
       .ppg-grid-2col { grid-template-columns: 1fr 1fr; }
     }
-    .ppg-metrics-grid {
+    .ppg-metrics-grid-4 {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 0.6rem;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.85rem;
+      margin-bottom: 0.85rem;
     }
+    @media (min-width: 768px) {
+      .ppg-metrics-grid-4 { grid-template-columns: repeat(4, 1fr); }
+    }
+    .ppg-metrics-grid-3 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.85rem;
+      margin-bottom: 0.85rem;
+    }
+    @media (min-width: 768px) {
+      .ppg-metrics-grid-3 { grid-template-columns: repeat(3, 1fr); }
+    }
+    .ppg-metrics-grid-3:last-child { margin-bottom: 0; }
   `;
   document.head.appendChild(s);
 }
@@ -192,37 +210,51 @@ export function createPpgView(container: HTMLElement): PpgViewHandle {
   metricsCard.appendChild(makeCardTitle("💓 Heart Rate Variability Metrics"));
   metricsCard.appendChild(
     makeCardDesc(
-      "9 RR-based metrics (active) + 8 advanced metrics (placeholder until LF/HF FFT, SpO₂, stress/stability/intensity arrive).",
+      "RR-based HRV + HR metrics. 카드 hover 시 산식 / 정상 범위 / 해석 / 학술 reference 표시. " +
+        "SpO₂ / Stress / LF / HF / LF-HF 는 DSP 미구현 — placeholder (No data).",
     ),
   );
-  const metricsGrid = document.createElement("div");
-  metricsGrid.className = "ppg-metrics-grid";
-  metricsCard.appendChild(metricsGrid);
+  // sensor-dashboard `PPGMetricsCards.tsx` 동일: 4-4-3-3 grid. 첫 두 행 4-col,
+  // 마지막 두 행 3-col. 각 카드는 threshold-driven rich card + hover tooltip.
+  const grid4a = document.createElement("div");
+  grid4a.className = "ppg-metrics-grid-4";
+  metricsCard.appendChild(grid4a);
+  const grid4b = document.createElement("div");
+  grid4b.className = "ppg-metrics-grid-4";
+  metricsCard.appendChild(grid4b);
+  const grid3a = document.createElement("div");
+  grid3a.className = "ppg-metrics-grid-3";
+  metricsCard.appendChild(grid3a);
+  const grid3b = document.createElement("div");
+  grid3b.className = "ppg-metrics-grid-3";
+  metricsCard.appendChild(grid3b);
   root.appendChild(metricsCard);
 
   container.appendChild(root);
 
-  // 17 metric cards. 9 active (HR/SDNN/RMSSD/SDSD/AVNN/PNN50/PNN20/HR Max/HR Min)
-  // + 8 placeholder (SpO₂/LF/HF/LF-HF/Stress/Stability/Intensity/Total Power).
+  // 14 metric cards (sensor-dashboard `PPGMetricsCards.tsx` 동일 순서).
+  // 활성 (DSP wired): bpm, hrMax, hrMin, sdnn, rmssd, sdsd, avnn, pnn50, pnn20.
+  // Placeholder (DSP 미구현 — null 유지): spo2, ppgStressIndex, lfPower, hfPower, lfHfRatio.
   const m = {
-    bpm: createMetricCard(metricsGrid, { label: "Heart Rate", unit: "bpm", dotColor: chartColors.bpm, decimals: 0 }),
-    spo2: createMetricCard(metricsGrid, { label: "SpO₂", unit: "%", dotColor: "#4ecdc4", decimals: 1 }),
-    hrMax: createMetricCard(metricsGrid, { label: "HR Max", unit: "bpm", dotColor: chartColors.bpm, decimals: 0 }),
-    hrMin: createMetricCard(metricsGrid, { label: "HR Min", unit: "bpm", dotColor: chartColors.bpm, decimals: 0 }),
-    stress: createMetricCard(metricsGrid, { label: "Stress Index", dotColor: "#f59e0b", decimals: 2 }),
-    rmssd: createMetricCard(metricsGrid, { label: "RMSSD", unit: "ms", dotColor: "#a855f7", decimals: 1 }),
-    sdnn: createMetricCard(metricsGrid, { label: "SDNN", unit: "ms", dotColor: "#a855f7", decimals: 1 }),
-    sdsd: createMetricCard(metricsGrid, { label: "SDSD", unit: "ms", dotColor: "#a855f7", decimals: 1 }),
-    lfPower: createMetricCard(metricsGrid, { label: "LF Power", dotColor: "#3b82f6", decimals: 1 }),
-    hfPower: createMetricCard(metricsGrid, { label: "HF Power", dotColor: "#10b981", decimals: 1 }),
-    lfHf: createMetricCard(metricsGrid, { label: "LF/HF", dotColor: "#f59e0b", decimals: 2 }),
-    avnn: createMetricCard(metricsGrid, { label: "AVNN", unit: "ms", dotColor: "#a855f7", decimals: 1 }),
-    pnn50: createMetricCard(metricsGrid, { label: "pNN50", unit: "%", dotColor: "#a855f7", decimals: 1 }),
-    pnn20: createMetricCard(metricsGrid, { label: "pNN20", unit: "%", dotColor: "#a855f7", decimals: 1 }),
-    stability: createMetricCard(metricsGrid, { label: "Stability", dotColor: "#14b8a6", decimals: 2 }),
-    intensity: createMetricCard(metricsGrid, { label: "Intensity", dotColor: "#a855f7", decimals: 2 }),
-    totalPower: createMetricCard(metricsGrid, { label: "Total Power", dotColor: "#6b6b7e", decimals: 1 }),
-  } as const satisfies Record<string, MetricCardHandle>;
+    // Row 1 (4-col): HR / SpO2 / HR Max / HR Min.
+    bpm: createIndexCard(grid4a, { threshold: ppgIndexThresholds.bpm, decimals: 0, requirePositive: true }),
+    spo2: createIndexCard(grid4a, { threshold: ppgIndexThresholds.spo2, decimals: 1 }),
+    hrMax: createIndexCard(grid4a, { threshold: ppgIndexThresholds.hrMax, decimals: 0 }),
+    hrMin: createIndexCard(grid4a, { threshold: ppgIndexThresholds.hrMin, decimals: 0 }),
+    // Row 2 (4-col): Stress / RMSSD / SDNN / SDSD.
+    ppgStressIndex: createIndexCard(grid4b, { threshold: ppgIndexThresholds.ppgStressIndex, decimals: 2 }),
+    rmssd: createIndexCard(grid4b, { threshold: ppgIndexThresholds.rmssd, decimals: 1 }),
+    sdnn: createIndexCard(grid4b, { threshold: ppgIndexThresholds.sdnn, decimals: 1 }),
+    sdsd: createIndexCard(grid4b, { threshold: ppgIndexThresholds.sdsd, decimals: 1 }),
+    // Row 3 (3-col): LF / HF / LF-HF.
+    lfPower: createIndexCard(grid3a, { threshold: ppgIndexThresholds.lfPower, decimals: 1 }),
+    hfPower: createIndexCard(grid3a, { threshold: ppgIndexThresholds.hfPower, decimals: 1 }),
+    lfHfRatio: createIndexCard(grid3a, { threshold: ppgIndexThresholds.lfHfRatio, decimals: 2 }),
+    // Row 4 (3-col): AVNN / PNN50 / PNN20.
+    avnn: createIndexCard(grid3b, { threshold: ppgIndexThresholds.avnn, decimals: 1 }),
+    pnn50: createIndexCard(grid3b, { threshold: ppgIndexThresholds.pnn50, decimals: 1 }),
+    pnn20: createIndexCard(grid3b, { threshold: ppgIndexThresholds.pnn20, decimals: 1 }),
+  } as const satisfies Record<string, IndexCardHandle>;
   for (const c of Object.values(m)) c.update(null);
 
   // ─── Charts ──────────────────────────────────────────────────────────────
@@ -342,7 +374,7 @@ export function createPpgView(container: HTMLElement): PpgViewHandle {
       const rrSeconds = peaksToRrSeconds(peaks, fs);
       const rrMs = rrSeconds.map((s) => s * 1000);
 
-      // 9 active metric cards 갱신 — RR ≥ 1 일 때 의미 있는 값.
+      // 활성 9 metric cards 갱신 — RR ≥ 1 일 때 의미 있는 값.
       if (rrMs.length >= 1) {
         const hr = computeHeartRate(rrMs);
         const hrv = computeHrvMetrics(rrMs);
@@ -369,7 +401,9 @@ export function createPpgView(container: HTMLElement): PpgViewHandle {
           series: [{ data: bpmData }],
         });
       }
-      // 나머지 8 placeholder cards — DSP 미구현, 항상 null 유지.
+      // Placeholder cards — DSP 미구현 (spo2 / ppgStressIndex / lfPower /
+      // hfPower / lfHfRatio). null 유지하면 카드는 "No data" 로 표시되고,
+      // hover 시 산식 / 정상 범위 / 해석 tooltip 은 정상 노출.
     },
     resize(): void {
       filteredChart.chart.resize();

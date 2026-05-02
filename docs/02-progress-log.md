@@ -49,6 +49,50 @@ spec §17의 검증 항목과 동기화. 진행 중인 것만 여기 노출.
 
 ## Log
 
+### 2026-05-03 (오전) — PPG HRV Metrics rich card + hover tooltip [PROGRESS]
+
+**무엇을**: 사용자 요청 — `💓 Heart Rate Variability Metrics` 영역의 모든 카드도
+EEG Indices 처럼 마우스 hover 시 상세 정보 표시. sensor-dashboard 의 PPG
+`PPGMetricsCards.tsx` 가 EEG `IndexCards.tsx` + `IndexTooltip.tsx` 와 동일한
+구조 + threshold metadata 를 사용하므로, EEG 카드 컴포넌트를 generic 으로
+일반화하여 양쪽에서 재사용.
+
+**변경**:
+- `src/ui/eeg-index-card.ts` → `src/ui/index-card.ts` 로 rename (git mv).
+- 함수·타입 generic 화: `createEegIndexCard` → `createIndexCard`,
+  `EegIndexCardOptions` → `IndexCardOptions`, `EegIndexCardHandle` → `IndexCardHandle`.
+- 옵션 추가: `decimals` (기본 2 — BPM 같은 정수 metric 은 0), `requirePositive`
+  (BPM 등이 0/음수 일 때 "No data" 처리).
+- `eeg-view.ts` import 갱신, totalPower 카드만 `decimals: 1` 추가.
+- `ppg-view.ts` 전면 갱신:
+  - `createMetricCard` → `createIndexCard` (14 카드, threshold-driven, hover
+    tooltip 포함).
+  - **placeholder 3개 제거** — 직전 [VERIFIED] 에서 지적된 deployed 와 mismatch
+    카드 (Stability / Intensity / Total Power) 삭제. 현재 14 = sensor-dashboard
+    동일.
+  - 그리드 레이아웃 `auto-fit minmax(140px)` → **4-4-3-3** (sensor-dashboard
+    `PPGMetricsCards.tsx` 정확 동일): 1행 HR/SpO2/HR Max/HR Min, 2행
+    Stress/RMSSD/SDNN/SDSD, 3행 LF/HF/LF-HF, 4행 AVNN/PNN50/PNN20.
+  - 변수명 정리: `m.stress` → `m.ppgStressIndex`, `m.lfHf` → `m.lfHfRatio`
+    (threshold key 와 일치).
+  - 활성 wired: bpm / hrMax / hrMin / sdnn / rmssd / sdsd / avnn / pnn50 / pnn20
+    (9개). placeholder (DSP 미구현 — null 유지): spo2 / ppgStressIndex /
+    lfPower / hfPower / lfHfRatio. Placeholder 도 hover tooltip 은 정상 노출
+    되어 "이 metric 이 무엇인지 / 정상 범위 / 산식 / 학술 reference" 학습 가능.
+
+**검증**: `tsc --noEmit` clean, `npm run test:run` 67/67 GREEN.
+
+**다음 단계**:
+- DSP 측에 SpO₂ (Beer-Lambert) / Welch periodogram (LF/HF) / 정규화된 stress
+  index (PPG) 구현 — 현재 placeholder 5개를 활성화.
+- 차후: PPG view 를 `detectPpgPeaksForHrv` (raw IR) + `computeHeartRateValidated`
+  로 wiring (이미 export 만 됨).
+
+**참조**: rename `src/ui/eeg-index-card.ts → src/ui/index-card.ts`,
+수정 `src/ui/eeg-view.ts`, `src/ui/ppg-view.ts`.
+
+---
+
 ### 2026-05-02 (밤) — v0.1.0 첫 release-worthy bump + Python reference 정리 + 코드 walkthrough 문서 [DECISION] [PROGRESS]
 
 **무엇을**: 사용자 요청 3건을 한 묶음으로 처리.

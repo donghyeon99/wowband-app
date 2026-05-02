@@ -37,7 +37,7 @@ import {
   buildRealtimeLineOption,
   createChart,
 } from "./chart";
-import { createEegIndexCard, type EegIndexCardHandle } from "./eeg-index-card";
+import { createIndexCard, type IndexCardHandle } from "./index-card";
 import { axisLabelStyle, chartColors, splitLineStyle, uiColors } from "./theme";
 
 const EEG_BUFFER_SIZE = 2000; // ~4s @ 500Hz
@@ -473,14 +473,14 @@ export function createEegView(container: HTMLElement): EegViewHandle {
   // 7 EEG Analysis Indices — 풍부한 카드 + 호버 tooltip. 표시 순서는
   // sensor-dashboard `IndexCards.tsx` 와 동일 (relax/emotional/focus/stress 1행,
   // total/cognitive/hemispheric 2행).
-  const indexCards: Record<string, EegIndexCardHandle> = {
-    relaxationIndex: createEegIndexCard(idxGrid, { threshold: eegIndexThresholds.relaxationIndex }),
-    emotionalStability: createEegIndexCard(idxGrid, { threshold: eegIndexThresholds.emotionalStability }),
-    focusIndex: createEegIndexCard(idxGrid, { threshold: eegIndexThresholds.focusIndex }),
-    stressIndex: createEegIndexCard(idxGrid, { threshold: eegIndexThresholds.stressIndex }),
-    totalPower: createEegIndexCard(idxGrid, { threshold: eegIndexThresholds.totalPower }),
-    cognitiveLoad: createEegIndexCard(idxGrid, { threshold: eegIndexThresholds.cognitiveLoad }),
-    hemisphericBalance: createEegIndexCard(idxGrid, { threshold: eegIndexThresholds.hemisphericBalance }),
+  const indexCards: Record<string, IndexCardHandle> = {
+    relaxationIndex: createIndexCard(idxGrid, { threshold: eegIndexThresholds.relaxationIndex }),
+    emotionalStability: createIndexCard(idxGrid, { threshold: eegIndexThresholds.emotionalStability }),
+    focusIndex: createIndexCard(idxGrid, { threshold: eegIndexThresholds.focusIndex }),
+    stressIndex: createIndexCard(idxGrid, { threshold: eegIndexThresholds.stressIndex }),
+    totalPower: createIndexCard(idxGrid, { threshold: eegIndexThresholds.totalPower, decimals: 1 }),
+    cognitiveLoad: createIndexCard(idxGrid, { threshold: eegIndexThresholds.cognitiveLoad }),
+    hemisphericBalance: createIndexCard(idxGrid, { threshold: eegIndexThresholds.hemisphericBalance }),
   };
 
   // ─── State (filter + buffers) ────────────────────────────────────────────
