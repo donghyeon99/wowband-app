@@ -1,4 +1,4 @@
-# linkband-app
+# wowband-app
 
 Link Band BLE SDK — browser app (TypeScript + Web Bluetooth API), deployable as a
 single static SPA.
@@ -48,7 +48,7 @@ responsive.
 ## Repo layout
 
 ```
-linkband-app/
+wowband-app/
 ├── docs/
 │   ├── 01-protocol-spec.md      ← BLE protocol (locked)
 │   ├── 02-progress-log.md       ← decision/progress log (newest entry on top)

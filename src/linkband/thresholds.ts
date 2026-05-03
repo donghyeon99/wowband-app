@@ -2,7 +2,7 @@
  * Threshold definitions — sensor-dashboard `src/lib/thresholds/indexThresholds.ts`
  * 의 verbatim 포팅. 과학적 근거 (논문 reference) 그대로 보존.
  *
- * 차이점: linkband-app 은 vanilla TS + inline-style 환경이라 Tailwind 클래스
+ * 차이점: wowband-app 은 vanilla TS + inline-style 환경이라 Tailwind 클래스
  * (`text-red-400`, `bg-red-500/10` 등) 대신 hex / rgba 문자열을 직접 반환.
  * 헬퍼 함수 시그니처는 그대로 유지 — 호출 측에선 색상 문자열을 그대로
  * `style.color` / `style.background` 등에 꽂으면 된다.

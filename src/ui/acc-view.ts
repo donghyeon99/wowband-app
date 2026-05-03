@@ -12,7 +12,7 @@
  * Magnitude 는 DSP 가 아닌 단순 산술 (3D 벡터 norm) — view 안에서 계산.
  * Stability / Intensity / activityState 는 `computeAccAnalysis` (dsp.ts) — 본
  * 산식은 approximate baseline (sensor-dashboard 가 server-side 라 client formula
- * 부재 → linkband-app 자체 정의, 실 디바이스 검증 후 조정).
+ * 부재 → wowband-app 자체 정의, 실 디바이스 검증 후 조정).
  *
  * 외부 인터페이스:
  *     const view = createAccView(container)

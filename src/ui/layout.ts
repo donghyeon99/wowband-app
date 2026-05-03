@@ -61,14 +61,14 @@ export function createHeader(container: HTMLElement, opts: HeaderOptions): Heade
     font-weight: 700;
     font-size: 0.9rem;
   `;
-  logo.textContent = "LB";
+  logo.textContent = "WB";
   brand.appendChild(logo);
 
   const brandText = document.createElement("div");
   const brandTitleRow = document.createElement("div");
   brandTitleRow.style.cssText = "display: flex; align-items: baseline; gap: 0.5rem;";
   const brandTitle = document.createElement("span");
-  brandTitle.textContent = "Link Band Dashboard";
+  brandTitle.textContent = "WowBand Dashboard";
   brandTitle.style.cssText = `font-size: 1rem; font-weight: 600; color: ${uiColors.textPrimary}; letter-spacing: -0.01em;`;
   brandTitleRow.appendChild(brandTitle);
   // Version badge — Vite 가 `__APP_VERSION__` 을 빌드 시점에 package.json 의 version 으로 substitute.
@@ -392,7 +392,7 @@ export interface FooterHandle {
 }
 
 // `__APP_VERSION__` 는 vite.config.ts 의 define 으로 build 시점에 package.json 의 version 으로 치환.
-const FOOTER_VERSION_LABEL = `Link Band v${__APP_VERSION__}`;
+const FOOTER_VERSION_LABEL = `WowBand v${__APP_VERSION__}`;
 
 /**
  * sensor-dashboard `Footer.tsx` 미러 — Messages 카운트 + Rate (msg/s) + Status +

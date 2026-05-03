@@ -1,4 +1,4 @@
-# Code Walkthrough — linkband-app
+# Code Walkthrough — wowband-app
 
 이 문서는 BLE 헤드밴드에서 흘러 나오는 byte stream 이 화면 위 픽셀로 변환되기까지의
 전체 데이터 흐름을, **실제 소스 코드 발췌** 와 함께 한 파일에 정리한다. 각 발췌

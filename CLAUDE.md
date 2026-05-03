@@ -1,4 +1,4 @@
-# linkband-app — Project Context
+# wowband-app — Project Context
 
 ## What this is
 
